@@ -1,0 +1,17 @@
+{
+  "name": "KAJAL H2O Business Manager",
+  "short_name": "KAJAL H2O",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f3f8fc",
+  "theme_color": "#075985",
+  "description": "Water delivery business manager",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
