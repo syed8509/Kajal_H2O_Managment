@@ -53,7 +53,7 @@ For local development, Vite proxies `/api` to the backend. Do not expose the dev
 1. Add a customer in **Customers**.
 2. Create an order for that customer and set quantities/prices.
 3. Order total is calculated from the line items. Record an initial payment if received.
-4. Add more payments later from the order list. Due balance is calculated as order total minus recorded payments.
+4. Add more payments later from the order list. Customer due is the positive net ledger balance (orders minus payments); advance balances are not classified as due.
 5. Mark the order Delivered to add delivery history.
 6. Use WhatsApp to open a prefilled message to a customer.
 7. Use **Backup** to download a JSON backup or CSV exports.
@@ -77,5 +77,8 @@ For local development, Vite proxies `/api` to the backend. Do not expose the dev
 ## Notes
 - Products are seeded as 250ml, 500ml, 1L, 2L, and 20L. Prices are editable when creating each order.
 - Payments are stored as ledger transactions and linked to orders. A payment cannot exceed that order's remaining balance in this starter.
+- Customer mobile numbers must be exactly 10 digits and start with 6, 7, 8, or 9.
+- Orders are listed Pending first, then Delivered, then Cancelled; ties are newest order date first. Customers with positive due appear first by highest due, with newest customers first for ties.
+- Dashboard cards for Today collection, customer due, today's orders, and pending delivery open their matching filtered detail lists.
 - Deleting customers/orders is intentionally not exposed in the UI to preserve financial history. Customers can be edited and marked inactive.
 - JSON backup includes customers, orders, and payment records. Keep backups in a secure location.

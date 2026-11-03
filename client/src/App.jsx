@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
   Users,
@@ -21,14 +22,26 @@ import {
 
 const API = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "") + "/api";
 const PRODUCTS = ["250ml", "500ml", "1L", "2L", "20L"];
-const TYPES = ["Shop", "Hotel", "Home", "Office", "special event", "Other"];
+const TYPES = ["Shop", "Hotel", "Home", "Office", "Bar", "event", "Other"];
 const METHODS = ["Cash", "UPI", "Bank Transfer", "Other"];
+const INVALID_MOBILE_MESSAGE = "Please enter a valid mobile number.";
+const isValidIndianMobile = (value) => /^[6-9][0-9]{9}$/.test(value);
 const money = (n) =>
   new Intl.NumberFormat("en-IN", {
     style: "currency",
     currency: "INR",
     maximumFractionDigits: 2,
   }).format(Number(n || 0));
+const makeRequestId = () =>
+  globalThis.crypto?.randomUUID?.() ||
+  `kh-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const localDateInput = (value) =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(value);
 const date = (d) =>
   d
     ? new Date(d).toLocaleDateString("en-IN", {
@@ -37,6 +50,27 @@ const date = (d) =>
         year: "numeric",
       })
     : "—";
+const dateTime = (value) => {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return "—";
+  return parsed.toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+};
+const reportingDateKey = (value) =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(value));
 const blankCustomer = {
   name: "",
   phone: "",
@@ -46,7 +80,40 @@ const blankCustomer = {
   notes: "",
 };
 
+function routeFromPath(pathname) {
+  const routes = {
+    "/": { page: "Dashboard", filter: "" },
+    "/dashboard": { page: "Dashboard", filter: "" },
+    "/customers": { page: "Customers", filter: "" },
+    "/customers/due": { page: "Customers", filter: "due" },
+    "/orders": { page: "Orders", filter: "" },
+    "/orders/today": { page: "Orders", filter: "today" },
+    "/orders/pending": { page: "Orders", filter: "pending" },
+    "/collections/today": { page: "Collections", filter: "today-collection" },
+    "/ledger": { page: "Ledger", filter: "" },
+    "/backup": { page: "Backup", filter: "" },
+  };
+  return routes[pathname] || routes["/"];
+}
+
+function navPath(page) {
+  return (
+    {
+      Dashboard: "/",
+      Customers: "/customers",
+      Orders: "/orders",
+      Ledger: "/ledger",
+      Backup: "/backup",
+    }[page] || "/"
+  );
+}
+
 export default function App() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const route = routeFromPath(location.pathname);
+  const page = route.page;
+  const listFilter = route.filter;
   const [token, setToken] = useState(
     () => localStorage.getItem("kh_token") || "",
   );
@@ -57,7 +124,6 @@ export default function App() {
       return null;
     }
   });
-  const [page, setPage] = useState("Dashboard");
   const [dashboard, setDashboard] = useState(null);
   const [customers, setCustomers] = useState([]);
   const [orders, setOrders] = useState([]);
@@ -65,6 +131,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
+  const [exporting, setExporting] = useState("");
   const [customerModal, setCustomerModal] = useState(null);
   const [orderModal, setOrderModal] = useState(false);
   const [paymentOrder, setPaymentOrder] = useState(null);
@@ -151,6 +218,7 @@ export default function App() {
     setDashboard(null);
     setCustomers([]);
     setOrders([]);
+    navigate("/", { replace: true });
   }
   async function saveCustomer(data) {
     try {
@@ -185,15 +253,26 @@ export default function App() {
       setOrderModal(false);
       setToast("Order created.");
       await refresh();
+      return true;
     } catch (e) {
       setError(e.message);
+      return false;
     }
   }
+  const loadCustomerAccount = useCallback(
+    (customerId) => {
+      return api(`/customers/${customerId}/account-summary`);
+    },
+    [api],
+  );
   async function addPayment(id, data) {
     try {
       await api(`/orders/${id}/payments`, {
         method: "POST",
-        body: JSON.stringify(data),
+        body: JSON.stringify({
+          ...data,
+          idempotencyKey: data.idempotencyKey || makeRequestId(),
+        }),
       });
       setPaymentOrder(null);
       setToast("Payment recorded.");
@@ -223,40 +302,111 @@ export default function App() {
     }
   }
   async function downloadExport(path, filename) {
+    if (exporting)
+      return { ok: false, message: "An export is already in progress." };
+    setExporting(filename);
+    setError("");
     try {
       const res = await api(path, { raw: true });
       const blob = await res.blob();
+      const file =
+        typeof File === "function"
+          ? new File([blob], filename, {
+              type: blob.type || "text/csv;charset=utf-8",
+            })
+          : null;
+      let canShareFile = false;
+      try {
+        canShareFile = Boolean(
+          file &&
+          typeof navigator.share === "function" &&
+          typeof navigator.canShare === "function" &&
+          navigator.canShare({ files: [file] }),
+        );
+      } catch {
+        canShareFile = false;
+      }
+      if (canShareFile && typeof navigator.share === "function") {
+        try {
+          await navigator.share({ files: [file], title: filename });
+          setToast(
+            "Export ready. Save it to Files or share it from the iPhone sheet.",
+          );
+          return {
+            ok: true,
+            message: "Export ready in the iPhone share sheet.",
+          };
+        } catch (shareError) {
+          if (shareError.name === "AbortError")
+            return {
+              ok: false,
+              message: "Sharing was cancelled. You can try the export again.",
+            };
+          if (shareError.name !== "NotAllowedError") throw shareError;
+        }
+      }
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = filename;
+      a.rel = "noopener";
       document.body.appendChild(a);
       a.click();
       a.remove();
-      URL.revokeObjectURL(url);
+      window.setTimeout(() => URL.revokeObjectURL(url), 120_000);
       setToast("Export downloaded.");
+      return { ok: true, message: "Export downloaded." };
     } catch (e) {
       setError(e.message);
+      return { ok: false, message: e.message || "Export failed." };
+    } finally {
+      setExporting("");
     }
   }
 
   const filteredCustomers = useMemo(
     () =>
-      customers.filter((c) =>
-        `${c.name} ${c.phone} ${c.address}`
+      customers.filter((c) => {
+        if (listFilter === "due" && !(c.balance > 0)) return false;
+        return `${c.name} ${c.phone} ${c.address}`
           .toLowerCase()
-          .includes(search.toLowerCase()),
-      ),
-    [customers, search],
+          .includes(search.toLowerCase());
+      }),
+    [customers, search, listFilter],
   );
+  const todayKey = reportingDateKey(new Date());
   const filteredOrders = useMemo(
     () =>
-      orders.filter((o) =>
-        `${o.orderNumber} ${o.customer?.name || ""} ${o.customer?.phone || ""}`
+      orders.filter((o) => {
+        if (
+          listFilter === "today" &&
+          reportingDateKey(o.orderDate) !== todayKey
+        )
+          return false;
+        if (listFilter === "pending" && o.deliveryStatus !== "Pending")
+          return false;
+        if (listFilter === "today" && o.deliveryStatus === "Cancelled")
+          return false;
+        return `${o.orderNumber} ${o.customer?.name || ""} ${o.customer?.phone || ""}`
           .toLowerCase()
-          .includes(search.toLowerCase()),
-      ),
-    [orders, search],
+          .includes(search.toLowerCase());
+      }),
+    [orders, search, listFilter, todayKey],
+  );
+  const todayPayments = useMemo(
+    () =>
+      orders
+        .flatMap((o) =>
+          (o.payments || [])
+            .filter((p) => reportingDateKey(p.paidAt) === todayKey)
+            .map((p) => ({
+              ...p,
+              customerName: o.customer?.name || "Customer",
+              reference: o.orderNumber,
+            })),
+        )
+        .sort((a, b) => new Date(b.paidAt) - new Date(a.paidAt)),
+    [orders, todayKey],
   );
 
   if (!token) return <Login onLogin={login} busy={busy} error={error} />;
@@ -268,6 +418,10 @@ export default function App() {
     { name: "Ledger", icon: Wallet },
     { name: "Backup", icon: Download },
   ];
+  const goTo = (path) => {
+    setSearch("");
+    navigate(path);
+  };
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -286,8 +440,7 @@ export default function App() {
               key={n.name}
               className={`nav-item ${page === n.name ? "active" : ""}`}
               onClick={() => {
-                setPage(n.name);
-                setSearch("");
+                goTo(navPath(n.name));
               }}
             >
               <n.icon size={18} />
@@ -340,16 +493,26 @@ export default function App() {
             data={dashboard}
             orders={orders}
             onNew={() => setOrderModal(true)}
-            onOrders={() => setPage("Orders")}
-            onCustomers={() => setPage("Customers")}
+            onOrders={() => goTo("/orders")}
+            onCustomers={() => goTo("/customers")}
+            onTodayCollection={() => goTo("/collections/today")}
+            onDue={() => goTo("/customers/due")}
+            onTodayOrders={() => goTo("/orders/today")}
+            onPendingDeliveries={() => goTo("/orders/pending")}
           />
         )}
         {page === "Customers" && (
           <section className="panel">
             <div className="section-head">
               <div>
-                <h2>Customers</h2>
-                <p>Manage your shops, hotels, homes and offices.</p>
+                <h2>
+                  {listFilter === "due" ? "Customer Due List" : "Customers"}
+                </h2>
+                <p>
+                  {listFilter === "due"
+                    ? "Customers with outstanding positive balances."
+                    : "Manage your shops, hotels, homes and offices."}
+                </p>
               </div>
               <button
                 className="primary"
@@ -375,8 +538,20 @@ export default function App() {
           <section className="panel">
             <div className="section-head">
               <div>
-                <h2>Orders & delivery</h2>
-                <p>Order totals, payments, balances and delivery status.</p>
+                <h2>
+                  {listFilter === "today"
+                    ? "Today’s Orders"
+                    : listFilter === "pending"
+                      ? "Pending Delivery"
+                      : "Orders & delivery"}
+                </h2>
+                <p>
+                  {listFilter === "today"
+                    ? "Orders created today."
+                    : listFilter === "pending"
+                      ? "Orders awaiting delivery."
+                      : "Order totals, payments, balances and delivery status."}
+                </p>
               </div>
               <button className="primary" onClick={() => setOrderModal(true)}>
                 <Plus size={17} /> New order
@@ -393,6 +568,17 @@ export default function App() {
               onDelivery={updateDelivery}
               onWhatsApp={openWhatsApp}
             />
+          </section>
+        )}
+        {page === "Collections" && (
+          <section className="panel">
+            <div className="section-head">
+              <div>
+                <h2>Today Collection</h2>
+                <p>Payments received today from existing order records.</p>
+              </div>
+            </div>
+            <CollectionTable payments={todayPayments} />
           </section>
         )}
         {page === "Ledger" && (
@@ -416,7 +602,13 @@ export default function App() {
             />
           </section>
         )}
-        {page === "Backup" && <BackupPage onDownload={downloadExport} />}
+        {page === "Backup" && (
+          <BackupPage
+            onDownload={downloadExport}
+            customers={customers}
+            exporting={exporting}
+          />
+        )}
       </main>
       <nav className="mobile-nav">
         {nav.map((n) => (
@@ -424,8 +616,7 @@ export default function App() {
             key={n.name}
             className={page === n.name ? "active" : ""}
             onClick={() => {
-              setPage(n.name);
-              setSearch("");
+              goTo(navPath(n.name));
             }}
           >
             <n.icon size={19} />
@@ -445,6 +636,7 @@ export default function App() {
           customers={customers}
           onClose={() => setOrderModal(false)}
           onSave={createOrder}
+          onLoadAccount={loadCustomerAccount}
         />
       )}
       {paymentOrder && (
@@ -516,7 +708,17 @@ function Login({ onLogin, busy, error }) {
     </div>
   );
 }
-function Dashboard({ data, orders, onNew, onOrders, onCustomers }) {
+function Dashboard({
+  data,
+  orders,
+  onNew,
+  onOrders,
+  onCustomers,
+  onTodayCollection,
+  onDue,
+  onTodayOrders,
+  onPendingDeliveries,
+}) {
   const stats = [
     {
       label: "Today's sales",
@@ -525,22 +727,44 @@ function Dashboard({ data, orders, onNew, onOrders, onCustomers }) {
       tone: "blue",
     },
     {
-      label: "Collected today",
+      label: "Monthly sales",
+      value: money(data?.monthlySales),
+      icon: ClipboardList,
+      tone: "purple",
+    },
+    {
+      label: "Today collection",
       value: money(data?.todayCollected),
       icon: Wallet,
       tone: "green",
+      onClick: onTodayCollection,
+    },
+    {
+      label: "Total collection",
+      value: money(data?.totalCollection),
+      icon: Wallet,
+      tone: "teal",
     },
     {
       label: "Total customer due",
       value: money(data?.totalDue),
       icon: AlertCircle,
       tone: "orange",
+      onClick: onDue,
+    },
+    {
+      label: "Today's orders",
+      value: data?.todayOrders ?? 0,
+      icon: ClipboardList,
+      tone: "blue",
+      onClick: onTodayOrders,
     },
     {
       label: "Pending deliveries",
       value: data?.pendingDeliveries ?? 0,
       icon: Truck,
       tone: "purple",
+      onClick: onPendingDeliveries,
     },
   ];
   return (
@@ -557,13 +781,13 @@ function Dashboard({ data, orders, onNew, onOrders, onCustomers }) {
       </div>
       <div className="stat-grid">
         {stats.map((s) => (
-          <div className="stat-card" key={s.label}>
+          <button className="stat-card" key={s.label} onClick={s.onClick}>
             <div className={`stat-icon ${s.tone}`}>
               <s.icon size={20} />
             </div>
             <span>{s.label}</span>
             <strong>{s.value}</strong>
-          </div>
+          </button>
         ))}
       </div>
       <div className="quick-grid">
@@ -610,6 +834,43 @@ function Dashboard({ data, orders, onNew, onOrders, onCustomers }) {
           compact
         />
       </section>
+    </div>
+  );
+}
+function CollectionTable({ payments }) {
+  if (!payments.length)
+    return (
+      <Empty
+        title="No payments today"
+        detail="Payments received today will appear here."
+      />
+    );
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Customer</th>
+            <th>Date / time</th>
+            <th>Amount</th>
+            <th>Method</th>
+            <th>Order / reference</th>
+          </tr>
+        </thead>
+        <tbody>
+          {payments.map((payment) => (
+            <tr key={`${payment._id}-${payment.reference}`}>
+              <td>{payment.customerName}</td>
+              <td>{new Date(payment.paidAt).toLocaleString("en-IN")}</td>
+              <td>
+                <b>{money(payment.amount)}</b>
+              </td>
+              <td>{payment.method}</td>
+              <td>{payment.reference}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -674,6 +935,11 @@ function CustomerTable({ customers, onEdit, onArchive, onLedger }) {
                 <b className={c.balance > 0 ? "due-text" : "paid-text"}>
                   {money(c.balance)}
                 </b>
+                {(c.availableAdvance || 0) > 0 && (
+                  <small className="block advance-text">
+                    Advance: {money(c.availableAdvance)}
+                  </small>
+                )}
               </td>
               <td>
                 <div className="action-row">
@@ -698,24 +964,21 @@ function CustomerTable({ customers, onEdit, onArchive, onLedger }) {
                     href={whatsappUrl(
                       c,
                       `*Hello Dear ${c.name}!* 
+*KAJAL H2O | WATER DISTRIBUTOR*
 
-*KAJAL H2O (Water Distibutor)*
+Need Water Bottels? 
 
-Aapko paani ki bottles chahiye? 
+Place your order by sharing:
 
-Agar haan, toh kripya humein ye details batayein:
+📦 *Quantity:* 
+🕒 *Delivery Location:* 
+🕒 *Preferred Delivery Time:* 
 
-📦 *Bottle Quantity:* 
-🕒 *Delivery Time:* 
-🕒 *Delivery Place:* 
-
-Apna order confirm karne ke liye WhatsApp par reply karein.
-
-*Call Now: 8509022744*
+*Order Now: 8509022744*
 
 *Thank You!*
-* Team KAJAL H2O *
-* Your Trusted Water Distributor*`,
+*Team KAJAL H2O *
+*Your Trusted Water Distributor*`,
                     )}
                     target="_blank"
                     rel="noopener noreferrer"
@@ -759,7 +1022,7 @@ function OrderTable({
             <th>Date</th>
             <th>Items</th>
             <th>Total</th>
-            <th>Paid / Due</th>
+            <th>Payments Allocated / Due</th>
             <th>Delivery</th>
             {!compact && <th>Actions</th>}
           </tr>
@@ -794,15 +1057,43 @@ function OrderTable({
               </td>
               <td>
                 <span className="paid-text">
-                  {money(
-                    o.paid ??
-                      (o.payments || []).reduce((s, p) => s + p.amount, 0),
-                  )}{" "}
-                  paid
+                  {money(o.allocatedPaid ?? o.paid ?? 0)} Payments Allocated
                 </span>
                 <small className="block due-text">
                   {money(o.due ?? Math.max(0, (o.total || 0) - (o.paid || 0)))}{" "}
                   due
+                </small>
+                <small className="block">
+                  Payment status:{" "}
+                  {o.paymentStatus || (o.due > 0 ? "Partially Paid" : "Paid")}
+                </small>
+                <small className="block">
+                  Previous due: {money(o.previousDue || 0)}
+                  {o.previousUnpaidDate && ` · ${date(o.previousUnpaidDate)}`}
+                </small>
+                {o.previousDueAdjustment && (
+                  <small className="block">
+                    Adjusted previous due: {money(o.adjustedPreviousDue || 0)}
+                    {o.previousDueAdjustment.reason &&
+                      ` · ${o.previousDueAdjustment.reason}`}
+                  </small>
+                )}
+                <small className="block">
+                  Total payable: {money(o.totalPayable ?? o.total ?? 0)}
+                </small>
+                {(o.availableAdvanceAtCreation || 0) > 0 && (
+                  <small className="block advance-text">
+                    Available advance: {money(o.availableAdvanceAtCreation)}
+                  </small>
+                )}
+                {(o.advanceApplied || 0) > 0 && (
+                  <small className="block advance-text">
+                    Advance used: {money(o.advanceApplied)}
+                  </small>
+                )}
+                <small className="block due-text">
+                  Final outstanding:{" "}
+                  {money(o.finalOutstandingDue ?? o.due ?? 0)}
                 </small>
               </td>
               <td>
@@ -813,15 +1104,16 @@ function OrderTable({
               {!compact && (
                 <td>
                   <div className="action-row">
-                    {o.due > 0 && (
-                      <button
-                        className="small-btn"
-                        title="Record payment"
-                        onClick={() => onPayment(o)}
-                      >
-                        <Wallet size={15} />
-                      </button>
-                    )}
+                    {o.deliveryStatus !== "Cancelled" &&
+                      (o.customerDue ?? o.due) > 0 && (
+                        <button
+                          className="small-btn"
+                          title="Record payment"
+                          onClick={() => onPayment(o)}
+                        >
+                          <Wallet size={15} />
+                        </button>
+                      )}
                     {o.deliveryStatus === "Pending" && (
                       <button
                         className="small-btn"
@@ -864,8 +1156,18 @@ function Empty({ title, detail }) {
 function CustomerModal({ initial, onClose, onSave }) {
   const [form, setForm] = useState({ ...blankCustomer, ...initial });
   const [saving, setSaving] = useState(false);
+  const [phoneError, setPhoneError] = useState("");
+  const [whatsappEdited, setWhatsappEdited] = useState(
+    Boolean(initial?._id || initial?.whatsappPhone),
+  );
   function set(k, v) {
-    setForm((f) => ({ ...f, [k]: v }));
+    setForm((f) => ({
+      ...f,
+      [k]: v,
+      ...(k === "phone" && !whatsappEdited ? { whatsappPhone: v } : {}),
+    }));
+    if (k === "whatsappPhone") setWhatsappEdited(true);
+    if (k === "phone" && isValidIndianMobile(v)) setPhoneError("");
   }
 
   return (
@@ -876,6 +1178,10 @@ function CustomerModal({ initial, onClose, onSave }) {
       <form
         onSubmit={async (e) => {
           e.preventDefault();
+          if (!isValidIndianMobile(form.phone)) {
+            setPhoneError(INVALID_MOBILE_MESSAGE);
+            return;
+          }
           setSaving(true);
           await onSave(form);
           setSaving(false);
@@ -894,10 +1200,13 @@ function CustomerModal({ initial, onClose, onSave }) {
             <input
               required
               inputMode="tel"
+              maxLength={10}
+              pattern="[6-9][0-9]{9}"
               value={form.phone || ""}
               onChange={(e) => set("phone", e.target.value)}
               placeholder="10-digit mobile number"
             />
+            {phoneError && <small className="form-error">{phoneError}</small>}
           </Field>
 
           <Field label="WhatsApp number (with country code)">
@@ -939,15 +1248,22 @@ function CustomerModal({ initial, onClose, onSave }) {
     </Modal>
   );
 }
-function OrderModal({ customers, onClose, onSave }) {
+function OrderModal({ customers, onClose, onSave, onLoadAccount }) {
   const [customerId, setCustomerId] = useState("");
   const [items, setItems] = useState([
     { product: "500ml", quantity: 1, unitPrice: 0 },
   ]);
   const [address, setAddress] = useState("");
   const [deliveryDate, setDeliveryDate] = useState("");
+  const [orderDate, setOrderDate] = useState(localDateInput(new Date()));
   const [initialPayment, setInitialPayment] = useState("0");
   const [initialPaymentMethod, setInitialPaymentMethod] = useState("Cash");
+  const [account, setAccount] = useState(null);
+  const [accountLoading, setAccountLoading] = useState(false);
+  const [previousDue, setPreviousDue] = useState("");
+  const [adjustmentReason, setAdjustmentReason] = useState("");
+  const [advanceToApply, setAdvanceToApply] = useState("0");
+  const [requestId] = useState(makeRequestId);
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const total = items.reduce(
@@ -957,7 +1273,54 @@ function OrderModal({ customers, onClose, onSave }) {
         Math.max(0, Number(i.unitPrice) || 0),
     0,
   );
-  const selected = customers.find((c) => c._id === customerId);
+  const systemPreviousDue = Number(account?.previousDue || 0);
+  const adjustedPreviousDue = Math.max(0, Number(previousDue) || 0);
+  const changedPreviousDue =
+    Math.round(adjustedPreviousDue * 100) !==
+    Math.round(systemPreviousDue * 100);
+  const advanceAmount = Math.max(0, Number(advanceToApply) || 0);
+  const totalPayable = adjustedPreviousDue + total;
+  const maxAdvance = Math.min(
+    100000000,
+    Number(account?.availableAdvance || 0),
+    totalPayable,
+  );
+  const maxPayment = Math.min(
+    100000000,
+    Math.max(0, totalPayable - advanceAmount),
+  );
+  const finalOutstandingDue = Math.max(
+    0,
+    totalPayable - advanceAmount - (Number(initialPayment) || 0),
+  );
+  useEffect(() => {
+    if (!customerId) {
+      setAccount(null);
+      setPreviousDue("");
+      setAdvanceToApply("0");
+      setAccountLoading(false);
+      return;
+    }
+    let current = true;
+    setAccountLoading(true);
+    setAccount(null);
+    onLoadAccount(customerId)
+      .then((summary) => {
+        if (!current) return;
+        setAccount(summary);
+        setPreviousDue(String(summary.previousDue || 0));
+        setAdvanceToApply("0");
+      })
+      .catch(() => {
+        if (current) setAccount(null);
+      })
+      .finally(() => {
+        if (current) setAccountLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [customerId, onLoadAccount]);
   function changeItem(idx, key, value) {
     setItems((old) =>
       old.map((it, i) => (i === idx ? { ...it, [key]: value } : it)),
@@ -968,8 +1331,11 @@ function OrderModal({ customers, onClose, onSave }) {
       <form
         onSubmit={async (e) => {
           e.preventDefault();
+          if (!account || accountLoading) return;
+          if (changedPreviousDue && !adjustmentReason.trim()) return;
           setSaving(true);
-          await onSave({
+          const saved = await onSave({
+            requestId,
             customerId,
             items: items.map((i) => ({
               ...i,
@@ -977,11 +1343,27 @@ function OrderModal({ customers, onClose, onSave }) {
               unitPrice: Number(i.unitPrice),
             })),
             address,
+            orderDate,
             deliveryDate: deliveryDate || null,
             initialPayment: Number(initialPayment) || 0,
             initialPaymentMethod,
+            expectedPreviousDue: systemPreviousDue,
+            previousDueAmount: adjustedPreviousDue,
+            adjustmentReason: changedPreviousDue ? adjustmentReason.trim() : "",
+            advanceToApply: advanceAmount,
             notes,
           });
+          if (!saved && customerId) {
+            try {
+              const latest = await onLoadAccount(customerId);
+              setAccount(latest);
+              setPreviousDue(String(latest.previousDue || 0));
+              setAdvanceToApply("0");
+              setAdjustmentReason("");
+            } catch {
+              setAccount(null);
+            }
+          }
           setSaving(false);
         }}
       >
@@ -994,6 +1376,8 @@ function OrderModal({ customers, onClose, onSave }) {
                 setCustomerId(e.target.value);
                 const c = customers.find((x) => x._id === e.target.value);
                 setAddress(c?.address || "");
+                setInitialPayment("0");
+                setAdjustmentReason("");
               }}
             >
               <option value="">Choose customer</option>
@@ -1020,10 +1404,9 @@ function OrderModal({ customers, onClose, onSave }) {
           <Field label="Order Date">
             <input
               type="date"
-              value={new Date().toLocaleDateString("en-CA")}
-              onChange={(e) =>
-                new Date().toLocaleDateString("en-CA")(e.target.value)
-              }
+              required
+              value={orderDate}
+              onChange={(e) => setOrderDate(e.target.value)}
             />
           </Field>
           <Field label="Delivery address">
@@ -1034,6 +1417,76 @@ function OrderModal({ customers, onClose, onSave }) {
             />
           </Field>
         </div>
+        {customerId && (
+          <section className="account-summary" aria-live="polite">
+            <div className="account-summary-head">
+              <div>
+                <b>Customer account</b>
+                <small>
+                  {accountLoading
+                    ? "Fetching latest balance…"
+                    : account?.previousUnpaidDate
+                      ? `Oldest unpaid transaction: ${date(account.previousUnpaidDate)}`
+                      : "No previous unpaid transaction"}
+                </small>
+              </div>
+              <div className="account-system-due">
+                <small>System-calculated Previous Due</small>
+                <b>{account ? money(systemPreviousDue) : "—"}</b>
+              </div>
+            </div>
+            {account ? (
+              <div className="form-grid">
+                <Field label="Previous Due (editable)">
+                  <input
+                    type="number"
+                    min="0"
+                    max="100000000"
+                    step="0.01"
+                    required
+                    value={previousDue}
+                    onChange={(e) => setPreviousDue(e.target.value)}
+                  />
+                </Field>
+                <Field label="Available Advance">
+                  <div className="advance-control">
+                    <span>{money(account.availableAdvance || 0)}</span>
+                    <input
+                      aria-label="Advance to use"
+                      type="number"
+                      min="0"
+                      max={maxAdvance}
+                      step="0.01"
+                      value={advanceToApply}
+                      onChange={(e) => setAdvanceToApply(e.target.value)}
+                    />
+                  </div>
+                </Field>
+                {changedPreviousDue && (
+                  <Field label="Reason for Previous Due adjustment" wide>
+                    <input
+                      required
+                      maxLength={500}
+                      value={adjustmentReason}
+                      onChange={(e) => setAdjustmentReason(e.target.value)}
+                      placeholder="Old bill correction, Previous payment correction, Manual balance correction"
+                    />
+                    <small className="form-hint">
+                      Separate ledger adjustment: {money(systemPreviousDue)} →{" "}
+                      {money(adjustedPreviousDue)}
+                    </small>
+                  </Field>
+                )}
+              </div>
+            ) : (
+              <p className="form-hint">
+                {accountLoading
+                  ? "Please wait while the customer ledger is fetched."
+                  : "Could not load this customer’s ledger. Change the customer or try again."}
+              </p>
+            )}
+          </section>
+        )}
         <div className="items-heading">
           <b>Order items</b>
           <button
@@ -1063,6 +1516,7 @@ function OrderModal({ customers, onClose, onSave }) {
               aria-label="Quantity"
               type="number"
               min="1"
+              max="100000"
               step="1"
               required
               value={it.quantity}
@@ -1073,6 +1527,7 @@ function OrderModal({ customers, onClose, onSave }) {
               aria-label="Unit price"
               type="number"
               min="0"
+              max="1000000"
               step="0.01"
               required
               value={it.unitPrice}
@@ -1097,13 +1552,45 @@ function OrderModal({ customers, onClose, onSave }) {
           <span>Order total</span>
           <strong>{money(total)}</strong>
         </div>
+        {account && (
+          <div className="account-totals" aria-live="polite">
+            <div>
+              <span>Previous Due</span>
+              <b>{money(adjustedPreviousDue)}</b>
+            </div>
+            <div>
+              <span>Current Order Amount</span>
+              <b>{money(total)}</b>
+            </div>
+            <div className="account-total-payable">
+              <span>Total Payable</span>
+              <b>{money(totalPayable)}</b>
+            </div>
+            <div>
+              <span>Available Advance</span>
+              <b>{money(account.availableAdvance || 0)}</b>
+            </div>
+            <div>
+              <span>Advance applied</span>
+              <b>{money(advanceAmount)}</b>
+            </div>
+            <div>
+              <span>Payment Received</span>
+              <b>{money(Number(initialPayment) || 0)}</b>
+            </div>
+            <div className="account-final-due">
+              <span>Final Outstanding Due</span>
+              <b>{money(finalOutstandingDue)}</b>
+            </div>
+          </div>
+        )}
         <div className="form-grid">
           <Field label="Payment received now (₹)">
             <input
               type="number"
               min="0"
               step="0.01"
-              max={total}
+              max={maxPayment}
               value={initialPayment}
               onChange={(e) => setInitialPayment(e.target.value)}
             />
@@ -1130,14 +1617,24 @@ function OrderModal({ customers, onClose, onSave }) {
         <ModalActions
           onClose={onClose}
           saving={saving}
-          disabled={!customers.length || total <= 0}
+          disabled={
+            !customers.length ||
+            !account ||
+            accountLoading ||
+            total <= 0 ||
+            advanceAmount > maxAdvance ||
+            (changedPreviousDue && !adjustmentReason.trim()) ||
+            Number(initialPayment) > maxPayment
+          }
         />
       </form>
     </Modal>
   );
 }
 function PaymentModal({ order, onClose, onSave }) {
-  const [amount, setAmount] = useState(String(order.due || ""));
+  const customerDue = Number(order.customerDue ?? order.due ?? 0);
+  const [amount, setAmount] = useState(String(customerDue || ""));
+  const [idempotencyKey] = useState(makeRequestId);
   const [method, setMethod] = useState("Cash");
   const [reference, setReference] = useState("");
   const [note, setNote] = useState("");
@@ -1148,14 +1645,24 @@ function PaymentModal({ order, onClose, onSave }) {
         {order.orderNumber} · {order.customer?.name}
       </p>
       <div className="balance-banner">
-        <span>Remaining due</span>
-        <strong>{money(order.due)}</strong>
+        <span>Customer total outstanding</span>
+        <strong>{money(customerDue)}</strong>
       </div>
+      <p className="form-hint">
+        Selected order remaining due: {money(order.due)}. This payment will be
+        allocated to the oldest outstanding orders first.
+      </p>
       <form
         onSubmit={async (e) => {
           e.preventDefault();
           setSaving(true);
-          await onSave({ amount: Number(amount), method, reference, note });
+          await onSave({
+            amount: Number(amount),
+            method,
+            reference,
+            note,
+            idempotencyKey,
+          });
           setSaving(false);
         }}
       >
@@ -1164,12 +1671,16 @@ function PaymentModal({ order, onClose, onSave }) {
             type="number"
             min="0.01"
             step="0.01"
-            max={order.due}
+            max={customerDue}
             required
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
           />
         </Field>
+        <p className="form-hint">
+          Maximum payment is the customer total outstanding balance. FIFO
+          allocation applies it across orders as needed.
+        </p>
         <Field label="Payment method">
           <select value={method} onChange={(e) => setMethod(e.target.value)}>
             {METHODS.map((m) => (
@@ -1211,7 +1722,9 @@ function LedgerModal({ data, onClose }) {
         </div>
         <div className="ledger-balance">
           <small>Current due</small>
-          <b>{money(data.balance)}</b>
+          <b>{money(data.due ?? data.balance)}</b>
+          <small className="advance-text">Available advance</small>
+          <b className="advance-text">{money(data.availableAdvance || 0)}</b>
         </div>
       </div>
       <div className="table-wrap ledger-table">
@@ -1229,17 +1742,71 @@ function LedgerModal({ data, onClose }) {
           <tbody>
             {data.rows.map((r, i) => (
               <tr key={i}>
-                <td>{date(r.date)}</td>
+                <td>{dateTime(r.date)}</td>
                 <td>
                   <span
-                    className={`type-pill ${r.type === "Payment" ? "payment-pill" : ""}`}
+                    className={`type-pill ${r.type === "Payment" ? "payment-pill" : r.type.includes("Adjustment") ? "adjustment-pill" : ""}`}
                   >
                     {r.type}
                   </span>
+                  {r.businessOrderDate && (
+                    <small className="block">
+                      Business order date: {date(r.businessOrderDate)}
+                    </small>
+                  )}
+                  {r.reason && <small className="block">{r.reason}</small>}
+                  {r.owner?.name && (
+                    <small className="block">By {r.owner.name}</small>
+                  )}
                 </td>
                 <td>
                   {r.reference}
                   {r.method && <small className="block">{r.method}</small>}
+                  {r.paymentReference && (
+                    <small className="block">
+                      Payment reference: {r.paymentReference}
+                    </small>
+                  )}
+                  {r.appliedToPreviousDue > 0 && (
+                    <small className="block">
+                      Applied to previous due: {money(r.appliedToPreviousDue)}
+                    </small>
+                  )}
+                  {r.allocations?.map((allocation, allocationIndex) => (
+                    <small
+                      className="block"
+                      key={`${r.reference}-${allocationIndex}`}
+                    >
+                      {allocation.allocationType === "reconstructed-legacy"
+                        ? "Reconstructed legacy allocation"
+                        : "Recorded allocation"}
+                      : {money(allocation.amount)} to{" "}
+                      {allocation.targetReference}
+                    </small>
+                  ))}
+                  {r.amount > 0 && r.type.startsWith("Payment Allocation") && (
+                    <small className="block">
+                      {money(r.amount)}{" "}
+                      {r.type === "Payment Allocation Reversal"
+                        ? "reversed from"
+                        : "reallocated to"}{" "}
+                      {r.targetReference}
+                    </small>
+                  )}
+                  {r.amount > 0 && r.type === "Advance Application" && (
+                    <small className="block">
+                      Applied advance: {money(r.amount)}
+                    </small>
+                  )}
+                  {r.sourceReference && (
+                    <small className="block">Source: {r.sourceReference}</small>
+                  )}
+                  {r.targetReference &&
+                    !r.type.startsWith("Payment Allocation") && (
+                      <small className="block">
+                        Applied to: {r.targetReference}
+                      </small>
+                    )}
                 </td>
                 <td>{r.debit ? money(r.debit) : "—"}</td>
                 <td>{r.credit ? money(r.credit) : "—"}</td>
@@ -1260,7 +1827,53 @@ function LedgerModal({ data, onClose }) {
     </Modal>
   );
 }
-function BackupPage({ onDownload }) {
+function BackupPage({ onDownload, customers, exporting }) {
+  const [customerId, setCustomerId] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [feedback, setFeedback] = useState(null);
+  useEffect(() => {
+    if (!customerId && customers.length) setCustomerId(customers[0]._id);
+  }, [customerId, customers]);
+
+  const selectedCustomer = customers.find(
+    (customer) => customer._id === customerId,
+  );
+  const periodLabel =
+    fromDate || toDate
+      ? `${fromDate || "Beginning"} → ${toDate || "Latest"}`
+      : "All transactions";
+  const exportParams = new URLSearchParams();
+  if (fromDate) exportParams.set("from", fromDate);
+  if (toDate) exportParams.set("to", toDate);
+  const query = exportParams.toString();
+
+  async function runCsvExport(kind) {
+    if (!customerId) {
+      setFeedback({ ok: false, message: "Select a customer first." });
+      return;
+    }
+    setFeedback(null);
+    const suffix = `${fromDate || "all"}-to-${toDate || "latest"}`;
+    const path =
+      kind === "ledger"
+        ? `/export/customers/${customerId}/ledger.csv${query ? `?${query}` : ""}`
+        : `/export/customers/${customerId}/payment-details.csv${query ? `?${query}` : ""}`;
+    const filename =
+      kind === "ledger"
+        ? `kajal-${selectedCustomer?.name || "customer"}-ledger-${suffix}.csv`
+        : `kajal-${selectedCustomer?.name || "customer"}-payment-details-${suffix}.csv`;
+    const result = await onDownload(
+      path,
+      filename.replace(/[^a-zA-Z0-9._-]+/g, "-"),
+    );
+    setFeedback(
+      result?.ok
+        ? { ok: true, message: result.message }
+        : { ok: false, message: result?.message || "Export failed." },
+    );
+  }
+
   return (
     <div className="backup-grid">
       <div className="backup-intro">
@@ -1274,6 +1887,113 @@ function BackupPage({ onDownload }) {
         </p>
       </div>
       <div className="backup-options">
+        <section className="export-filter-card" aria-label="CSV export options">
+          <div>
+            <h3>CSV export details</h3>
+            <p>
+              Choose a customer and optional date range. Dates use India
+              Standard Time.
+            </p>
+          </div>
+          <div className="export-filter-grid">
+            <Field label="Customer">
+              <select
+                value={customerId}
+                onChange={(event) => setCustomerId(event.target.value)}
+              >
+                <option value="">Select customer</option>
+                {customers.map((customer) => (
+                  <option key={customer._id} value={customer._id}>
+                    {customer.name} · {customer.phone}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="From date">
+              <input
+                type="date"
+                value={fromDate}
+                max={toDate || undefined}
+                onChange={(event) => setFromDate(event.target.value)}
+              />
+            </Field>
+            <Field label="To date">
+              <input
+                type="date"
+                value={toDate}
+                min={fromDate || undefined}
+                onChange={(event) => setToDate(event.target.value)}
+              />
+            </Field>
+          </div>
+          <div className="export-selection-summary">
+            <span>
+              <b>Customer:</b> {selectedCustomer?.name || "Select a customer"}
+            </span>
+            <span>
+              <b>Period:</b> {periodLabel}
+            </span>
+            {selectedCustomer && (
+              <span>
+                <b>Current:</b> Due {money(selectedCustomer.balance)} · Advance{" "}
+                {money(selectedCustomer.availableAdvance)}
+              </span>
+            )}
+          </div>
+        </section>
+
+        <button
+          className="csv-export-action"
+          disabled={!customerId || Boolean(exporting)}
+          onClick={() => runCsvExport("ledger")}
+        >
+          <div className="export-icon green">
+            <FileSpreadsheet />
+          </div>
+          <div>
+            <b>Customer Ledger CSV</b>
+            <small>
+              Readable statement with period opening, closing, debit, credit and
+              running balance
+            </small>
+          </div>
+          <span>
+            {exporting?.includes("ledger") ? "Preparing…" : "Download"}
+          </span>
+        </button>
+        <button
+          className="csv-export-action"
+          disabled={!customerId || Boolean(exporting)}
+          onClick={() => runCsvExport("payments")}
+        >
+          <div className="export-icon amber">
+            <FileSpreadsheet />
+          </div>
+          <div>
+            <b>Payment Details CSV · Internal</b>
+            <small>
+              Payment IDs, FIFO allocations, idempotency references and
+              adjustment/cancellation audit
+            </small>
+          </div>
+          <span>
+            {exporting?.includes("payment-details") ? "Preparing…" : "Download"}
+          </span>
+        </button>
+        {exporting && (
+          <div className="export-progress" role="status" aria-live="polite">
+            <span className="export-spinner" /> Preparing {exporting}…
+          </div>
+        )}
+        {feedback && (
+          <div
+            className={`export-feedback ${feedback.ok ? "success" : "failure"}`}
+            role="status"
+            aria-live="polite"
+          >
+            {feedback.message}
+          </div>
+        )}
         <button
           onClick={() =>
             onDownload("/export/backup.json", "kajal-h2o-backup.json")
@@ -1396,47 +2116,30 @@ function formatDate(date) {
 function openWhatsApp(order) {
   const c = order.customer || {};
   const msg = `*KAJAL H2O*
-🚰 _Pure Water • Safe Water • Home Delivery_
-
+🚰Water Distibutor Kharagpur
 ━━━━━━━━━━━━━━━━━━
 🌟 *ORDER & PAYMENT RECEIPT*
 ━━━━━━━━━━━━━━━━━━
-
 👋 Dear *${c.name || "Valued Customer"}*,
-
 🙏 Thank you for choosing *KAJAL H2O*!
-We truly appreciate your trust in our service. ❤️
 
 🧾 *ORDER SUMMARY*
 ━━━━━━━━━━━━━━━━━━
 💰 Total Amount : *${money(order.total)}*
 ✅ Paid Amount  : *${money(order.paid)}*
 ⏳ Due Amount   : *${money(order.due)}*
-━━━━━━━━━━━━━━━━━━
 
-📅 *DELIVERY DETAILS*
-🛍️ Order Date    : ${formatDate(order.orderDate)}
 🚚 Delivery Date : ${formatDate(order.deliveryDate)}
 
-━━━━━━━━━━━━━━━━━━
 💳 *PAYMENT INFORMATION*
 ━━━━━━━━━━━━━━━━━━
+📱 *UPI ID*:${"8509022744@pnb"}
+📲 *GPay / PhonePe*:${"8509022744"}
 
-📱 *UPI ID*
-${"8509022744@pnb"}
-
-📲 *GPay / PhonePe*
-${"8509022744"}
-
-💡 Please verify the payment details before making a transfer.
-
-━━━━━━━━━━━━━━━━━━
 🤝 *THANK YOU FOR YOUR TRUST!*
 ━━━━━━━━━━━━━━━━━━
-
 💧 *KAJAL H2O*
 ✨ Your Trusted Water Partner
-📍 Kharagpur
 📞 Contact: 8509022744
 
 💙 *Pure Water • Safe Water • Happy Family*
