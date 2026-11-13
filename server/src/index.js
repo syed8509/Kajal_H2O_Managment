@@ -22,11 +22,14 @@ import {
   customerLedgerRows,
   customerLedgerTotals,
   calculateFifoAccounting,
+  customerPaymentDueSnapshot,
   fifoPaymentAllocations,
   findPaymentByIdempotencyKey,
   INVALID_MOBILE_MESSAGE,
+  DUPLICATE_CUSTOMER_PHONE_MESSAGE,
   isValidMoney,
   isValidIndianMobile,
+  normalizeIndianMobile,
   initialOrderPaymentLimit,
   orderDue,
   orderPaymentValidationError,
@@ -297,14 +300,17 @@ app.get("/api/customers", async (req, res, next) => {
 });
 app.post("/api/customers", async (req, res, next) => {
   try {
-    const { name, phone } = req.body;
-    if (!String(name || "").trim() || !String(phone || "").trim())
+    const { name } = req.body;
+    const phone = normalizeIndianMobile(req.body.phone);
+    if (!String(name || "").trim())
       return res
         .status(400)
-        .json({ message: "Customer name and phone are required." });
-    if (!isValidIndianMobile(phone))
+        .json({ message: "Customer name is required." });
+    if (phone && !isValidIndianMobile(phone))
       return res.status(400).json({ message: INVALID_MOBILE_MESSAGE });
-    const customer = await Customer.create(sanitizeCustomer(req.body));
+    if (phone && await Customer.exists({ phone, active: true }))
+      return res.status(409).json({ message: DUPLICATE_CUSTOMER_PHONE_MESSAGE });
+    const customer = await Customer.create(sanitizeCustomer({ ...req.body, phone }));
     res.status(201).json(customer);
   } catch (e) {
     next(e);
@@ -312,11 +318,19 @@ app.post("/api/customers", async (req, res, next) => {
 });
 app.put("/api/customers/:id", async (req, res, next) => {
   try {
-    if (!isValidIndianMobile(req.body.phone))
+    const phone = normalizeIndianMobile(req.body.phone);
+    if (phone && !isValidIndianMobile(phone))
       return res.status(400).json({ message: INVALID_MOBILE_MESSAGE });
+    if (!mongoose.isValidObjectId(req.params.id))
+      return res.status(404).json({ message: "Customer not found." });
+    if (phone && await Customer.exists({
+      phone,
+      active: true,
+      _id: { $ne: req.params.id },
+    })) return res.status(409).json({ message: DUPLICATE_CUSTOMER_PHONE_MESSAGE });
     const customer = await Customer.findByIdAndUpdate(
       req.params.id,
-      sanitizeCustomer(req.body),
+      sanitizeCustomer({ ...req.body, phone }),
       { new: true, runValidators: true },
     );
     if (!customer)
@@ -666,6 +680,101 @@ app.post("/api/orders/:id/payments", async (req, res, next) => {
     next(e);
   }
 });
+app.post("/api/customers/:id/payments", async (req, res, next) => {
+  try {
+    const amount = Number(req.body.amount);
+    if (!isValidMoney(amount, { allowZero: false }))
+      return res
+        .status(400)
+        .json({ message: "Enter a valid payment amount greater than zero." });
+    const idempotencyKey = String(req.body.idempotencyKey || "").trim();
+    if (!idempotencyKey || idempotencyKey.length > 100)
+      return res
+        .status(400)
+        .json({ message: "A valid payment request ID is required." });
+    if (!mongoose.isValidObjectId(req.params.id))
+      return res.status(404).json({ message: "Active customer not found." });
+
+    const result = await withCustomerLedgerLock(
+      req.params.id,
+      async (customer, assertLock) => {
+        const orders = await Order.find({ customer: customer._id }).lean();
+        const totals = customerLedgerTotals(orders);
+        const priorOrder = findPaymentByIdempotencyKey(orders, idempotencyKey);
+        if (priorOrder) {
+          const priorPayment = priorOrder.payments.find(
+            (payment) => payment.idempotencyKey === idempotencyKey,
+          );
+          const dueSnapshot = customerPaymentDueSnapshot(
+            priorPayment?.customerDueBefore ?? totals.due + amount,
+            priorPayment?.amount ?? amount,
+          );
+          return {
+            customer: {
+              _id: customer._id,
+              name: customer.name,
+              phone: customer.phone,
+              whatsappPhone: customer.whatsappPhone,
+            },
+            amount: priorPayment?.amount ?? amount,
+            ...dueSnapshot,
+          };
+        }
+        if (totals.due <= 0)
+          throw httpError(400, "This customer has no outstanding balance.");
+        if (amount > totals.due + 0.00001)
+          throw httpError(
+            400,
+            "Payment cannot exceed the customer's total outstanding due.",
+          );
+        const paidAt = req.body.paidAt ? new Date(req.body.paidAt) : new Date();
+        if (!Number.isFinite(paidAt.getTime()))
+          throw httpError(400, "Enter a valid payment date.");
+        const allocations = fifoPaymentAllocations(orders, amount);
+        const receiptOrderId = allocations[0]?.targetOrder;
+        const receiptOrder = await Order.findOne({
+          _id: receiptOrderId,
+          customer: customer._id,
+          deliveryStatus: { $ne: "Cancelled" },
+        });
+        if (!receiptOrder)
+          throw httpError(
+            409,
+            "Customer balances changed. Refresh and try again.",
+          );
+        const dueSnapshot = customerPaymentDueSnapshot(totals.due, amount);
+        receiptOrder.payments.push({
+          amount,
+          appliedToPreviousDue: 0,
+          customerDueBefore: dueSnapshot.previousDue,
+          customerDueAfter: dueSnapshot.currentDue,
+          allocations,
+          method: validMethod(req.body.method),
+          reference: String(req.body.reference || "").slice(0, 100),
+          note: String(req.body.note || "").slice(0, 500),
+          paidAt,
+          idempotencyKey,
+          recordedBy: ownerAudit(req.owner),
+        });
+        await assertLock();
+        await receiptOrder.save();
+        return {
+          customer: {
+            _id: customer._id,
+            name: customer.name,
+            phone: customer.phone,
+            whatsappPhone: customer.whatsappPhone,
+          },
+          amount,
+          ...dueSnapshot,
+        };
+      },
+    );
+    res.json(result);
+  } catch (e) {
+    next(e);
+  }
+});
 app.patch("/api/orders/:id/delivery", async (req, res, next) => {
   try {
     const status = req.body.deliveryStatus;
@@ -949,9 +1058,7 @@ app.get("/api/export/orders.csv", async (_req, res, next) => {
 });
 
 function sanitizeCustomer(body) {
-  const phone = String(body.phone || "")
-    .trim()
-    .slice(0, 20);
+  const phone = normalizeIndianMobile(body.phone);
   return {
     name: String(body.name || "")
       .trim()
@@ -1150,6 +1257,15 @@ app.use((err, _req, res, _next) => {
     return res.status(err.statusCode).json({ message: err.message });
   if (err?.name === "ValidationError" || err?.name === "CastError")
     return res.status(400).json({ message: err.message });
+  if (
+    err?.code === 11000 &&
+    (err?.keyPattern?.phone ||
+      err?.keyValue?.phone ||
+      String(err?.message || "").includes("uniq_active_customer_phone"))
+  )
+    return res
+      .status(409)
+      .json({ message: DUPLICATE_CUSTOMER_PHONE_MESSAGE });
   if (err?.code === 11000)
     return res
       .status(409)
@@ -1169,4 +1285,5 @@ if (!process.env.MONGODB_URI || !process.env.JWT_SECRET) {
   process.exit(1);
 }
 await mongoose.connect(process.env.MONGODB_URI);
+await Customer.createIndexes();
 app.listen(PORT, () => console.log(`KAJAL H2O API listening on port ${PORT}`));

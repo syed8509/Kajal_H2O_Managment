@@ -6,11 +6,9 @@ const customerSchema = new mongoose.Schema(
     name: { type: String, required: true, trim: true, maxlength: 120 },
     phone: {
       type: String,
-      required: true,
       trim: true,
-      match: [/^[6-9][0-9]{9}$/, "Invalid Indian mobile number."],
       validate: {
-        validator: isValidIndianMobile,
+        validator: (value) => !value || isValidIndianMobile(value),
         message: "Invalid Indian mobile number.",
       },
     },
@@ -27,6 +25,17 @@ const customerSchema = new mongoose.Schema(
     accountingLockExpiresAt: { type: Date, default: null },
   },
   { timestamps: true },
+);
+customerSchema.index(
+  { phone: 1 },
+  {
+    name: "uniq_active_customer_phone",
+    unique: true,
+    partialFilterExpression: {
+      active: true,
+      phone: { $type: "string", $gt: "" },
+    },
+  },
 );
 
 const orderItemSchema = new mongoose.Schema(
@@ -55,6 +64,8 @@ const paymentSchema = new mongoose.Schema(
   {
     amount: { type: Number, required: true, min: 0.01, max: 100000000 },
     appliedToPreviousDue: { type: Number, min: 0, max: 100000000, default: 0 },
+    customerDueBefore: { type: Number, min: 0, max: 100000000 },
+    customerDueAfter: { type: Number, min: 0, max: 100000000 },
     allocations: {
       type: [
         new mongoose.Schema(

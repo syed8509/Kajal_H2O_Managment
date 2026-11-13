@@ -11,7 +11,9 @@ import {
   fifoPaymentAllocations,
   findPaymentByIdempotencyKey,
   isValidMoney,
+  customerPaymentDueSnapshot,
   isValidIndianMobile,
+  normalizeIndianMobile,
   initialOrderPaymentLimit,
   orderPaymentValidationError,
   orderDue,
@@ -20,7 +22,7 @@ import {
   pendingDeliveryOrders,
   previousUnpaidDate,
 } from "../src/business.js";
-import { Order } from "../src/models.js";
+import { Customer, Order } from "../src/models.js";
 import {
   buildCustomerLedgerExport,
   parseIndiaDateRange,
@@ -64,11 +66,32 @@ test("Indian mobile validation accepts only valid 10-digit numbers", () => {
     "987654321",
     "98765432101",
     "12345ABCDE",
-    "98765 43210",
     "",
   ]) {
     assert.equal(isValidIndianMobile(value), false, value);
   }
+});
+
+test("customer phones normalize formatting while blank phones remain optional", () => {
+  assert.equal(normalizeIndianMobile("98765-43210"), "9876543210");
+  assert.equal(isValidIndianMobile("98765 43210"), true);
+  assert.equal(normalizeIndianMobile("  "), "");
+  assert.equal(isValidIndianMobile("+91 98765 43210"), false);
+  assert.equal(isValidIndianMobile("Call 9876543210"), false);
+});
+
+test("active customers have a unique phone index that excludes blank and archived records", () => {
+  const phone = Customer.schema.path("phone");
+  assert.equal(phone.options.required, undefined);
+  const index = Customer.schema.indexes().find(([keys, options]) =>
+    keys.phone === 1 && options.name === "uniq_active_customer_phone",
+  );
+  assert.ok(index);
+  assert.equal(index[1].unique, true);
+  assert.deepEqual(index[1].partialFilterExpression, {
+    active: true,
+    phone: { $type: "string", $gt: "" },
+  });
 });
 
 test("customer due and available advance remain separate", () => {
@@ -90,6 +113,17 @@ test("customer due and available advance remain separate", () => {
     customerAvailableAdvance([order("Pending", "2026-03-01", 100, 150)]),
     50,
   );
+});
+
+test("customer payment receipt snapshot keeps due before and after payment to cents", () => {
+  assert.deepEqual(customerPaymentDueSnapshot(1000, 400), {
+    previousDue: 1000,
+    currentDue: 600,
+  });
+  assert.deepEqual(customerPaymentDueSnapshot(10.1, 10.1), {
+    previousDue: 10.1,
+    currentDue: 0,
+  });
 });
 
 test("previous due, an applied advance, and a partial payment calculate once", () => {
@@ -579,6 +613,8 @@ test("order and payment retry keys are unique so retries cannot duplicate ledger
   assert.equal(paymentSchema.path("idempotencyKey").options.type, String);
   assert.equal(paymentSchema.path("appliedToPreviousDue").options.default, 0);
   assert.ok(paymentSchema.path("allocations"));
+  assert.equal(paymentSchema.path("customerDueBefore").options.type, Number);
+  assert.equal(paymentSchema.path("customerDueAfter").options.type, Number);
 });
 
 test("FIFO projection applies explicit allocations across orders and keeps paid orders", () => {

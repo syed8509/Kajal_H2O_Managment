@@ -537,6 +537,17 @@ tbody tr:hover {
 	background: #fbfdff
 }
 
+tbody tr.today-delivery-pending > td,
+tbody tr.today-delivery-pending:hover > td {
+	background: #fff0f0
+}
+
+.payment-whatsapp-button {
+	width: 100%;
+	margin-top: 12px;
+	justify-content: center;
+}
+
 td b {
 	color: #213e56
 }

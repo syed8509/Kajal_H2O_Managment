@@ -5,9 +5,17 @@ export const ORDER_STATUS_PRIORITY = {
 };
 
 export const INVALID_MOBILE_MESSAGE = "Please enter a valid mobile number.";
+export const DUPLICATE_CUSTOMER_PHONE_MESSAGE =
+  "An active customer already uses this phone number.";
+
+export function normalizeIndianMobile(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  return raw.replace(/[\s().-]/g, "");
+}
 
 export function isValidIndianMobile(value) {
-  return /^[6-9][0-9]{9}$/.test(String(value ?? ""));
+  return /^[6-9][0-9]{9}$/.test(normalizeIndianMobile(value));
 }
 
 export function orderTotal(order) {
@@ -22,6 +30,15 @@ export function orderPaid(order) {
     (sum, payment) => sum + payment.amount,
     0,
   );
+}
+
+export function customerPaymentDueSnapshot(previousDue, amount) {
+  const before = Math.round(Number(previousDue) * 100) / 100;
+  const received = Math.round(Number(amount) * 100) / 100;
+  return {
+    previousDue: before,
+    currentDue: Math.max(0, Math.round((before - received) * 100) / 100),
+  };
 }
 
 const stableOrderCompare = (a, b) =>

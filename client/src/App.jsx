@@ -8,9 +8,8 @@ import {
   Download,
   LogOut,
   Plus,
-  Search,
+  Banknote,
   MessageCircle,
-  Truck,
   X,
   Check,
   Droplets,
@@ -19,66 +18,39 @@ import {
   AlertCircle,
   Edit3,
 } from "lucide-react";
+import {
+  PRODUCTS,
+  TYPES,
+  METHODS,
+  INVALID_MOBILE_MESSAGE,
+  isValidIndianMobile,
+  normalizeIndianMobile,
+  blankCustomer,
+} from "./constants.js";
+import {
+  money,
+  makeRequestId,
+  localDateInput,
+  date,
+  dateTime,
+  reportingDateKey,
+} from "./utils/formatters.js";
+import { openWhatsApp, whatsappUrl } from "./utils/whatsapp.js";
+import { buildCustomerLedgerWhatsAppMessage } from "./utils/customerLedgerWhatsApp.js";
+import {
+  buildCustomerDueReminderMessage,
+  buildCustomerPaymentWhatsAppMessage,
+} from "./utils/customerPaymentWhatsApp.js";
+import { customerPaymentHistory, dueCustomers } from "./utils/customerPayments.js";
+
+import { Login } from "./pages/LoginPage.jsx";
+import { Dashboard } from "./pages/DashboardPage.jsx";
+import { OrderTable } from "./components/orders/OrderTable.jsx";
+import { SearchBox } from "./components/common/SearchBox.jsx";
+import { Empty } from "./components/common/Empty.jsx";
+import { Modal, Field, ModalActions } from "./components/common/Modal.jsx";
 
 const API = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "") + "/api";
-const PRODUCTS = ["250ml", "500ml", "1L", "2L", "20L"];
-const TYPES = ["Shop", "Hotel", "Home", "Office", "Bar", "event", "Other"];
-const METHODS = ["Cash", "UPI", "Bank Transfer", "Other"];
-const INVALID_MOBILE_MESSAGE = "Please enter a valid mobile number.";
-const isValidIndianMobile = (value) => /^[6-9][0-9]{9}$/.test(value);
-const money = (n) =>
-  new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    maximumFractionDigits: 2,
-  }).format(Number(n || 0));
-const makeRequestId = () =>
-  globalThis.crypto?.randomUUID?.() ||
-  `kh-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-const localDateInput = (value) =>
-  new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Kolkata",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(value);
-const date = (d) =>
-  d
-    ? new Date(d).toLocaleDateString("en-IN", {
-        day: "2-digit",
-        month: "short",
-        year: "numeric",
-      })
-    : "—";
-const dateTime = (value) => {
-  if (!value) return "—";
-  const parsed = new Date(value);
-  if (!Number.isFinite(parsed.getTime())) return "—";
-  return parsed.toLocaleString("en-IN", {
-    timeZone: "Asia/Kolkata",
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-};
-const reportingDateKey = (value) =>
-  new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Kolkata",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(value));
-const blankCustomer = {
-  name: "",
-  phone: "",
-  whatsappPhone: "",
-  type: "Shop",
-  address: "",
-  notes: "",
-};
 
 function routeFromPath(pathname) {
   const routes = {
@@ -135,6 +107,8 @@ export default function App() {
   const [customerModal, setCustomerModal] = useState(null);
   const [orderModal, setOrderModal] = useState(false);
   const [paymentOrder, setPaymentOrder] = useState(null);
+  const [customerPayment, setCustomerPayment] = useState(null);
+  const [paymentReceipt, setPaymentReceipt] = useState(null);
   const [ledgerCustomer, setLedgerCustomer] = useState(null);
 
   const api = useCallback(
@@ -232,8 +206,9 @@ export default function App() {
       setCustomerModal(null);
       setToast("Customer saved successfully.");
       await refresh();
+      return true;
     } catch (e) {
-      setError(e.message);
+      return e.message || "Could not save customer. Please try again.";
     }
   }
   async function archiveCustomer(c) {
@@ -281,6 +256,35 @@ export default function App() {
       setError(e.message);
     }
   }
+  async function openCustomerPayment(c) {
+    try {
+      const ledger = await api(`/customers/${c._id}/ledger`);
+      if (!(ledger.due > 0)) {
+        setError("This customer has no outstanding balance.");
+        await refresh();
+        return;
+      }
+      setCustomerPayment({ customer: c, ledger });
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+  async function addCustomerPayment(customerId, data) {
+    try {
+      const result = await api(`/customers/${customerId}/payments`, {
+        method: "POST",
+        body: JSON.stringify({ ...data, idempotencyKey: data.idempotencyKey || makeRequestId() }),
+      });
+      setCustomerPayment(null);
+      setToast("Payment recorded.");
+      await refresh();
+      setPaymentReceipt(result);
+      return true;
+    } catch (e) {
+      setError(e.message);
+      return false;
+    }
+  }
   async function updateDelivery(order, status) {
     try {
       await api(`/orders/${order._id}/delivery`, {
@@ -300,6 +304,64 @@ export default function App() {
     } catch (e) {
       setError(e.message);
     }
+  }
+  function openCustomerLedgerWhatsApp(c) {
+    const phone = String(c?.whatsappPhone || c?.phone || "").replace(/\D/g, "");
+    if (!(phone.length === 10 || (phone.length >= 11 && phone.length <= 15))) {
+      setError("This customer does not have a valid WhatsApp number. Update the customer details and try again.");
+      return;
+    }
+    const popup = window.open("about:blank", "_blank");
+    if (!popup) {
+      setError("The WhatsApp window was blocked. Allow pop-ups for this site and try again.");
+      return;
+    }
+    setError("");
+    (async () => {
+      try {
+        const ledger = await api(`/customers/${c._id}/ledger`);
+        const message = buildCustomerLedgerWhatsAppMessage(ledger);
+        if (encodeURIComponent(message).length > 60000) {
+          popup.close();
+          setError("This ledger is too large to fit safely in a WhatsApp link. Download the full ledger statement instead.");
+          return;
+        }
+        popup.location.href = whatsappUrl(ledger.customer || c, message);
+      } catch (e) {
+        popup.close();
+        setError(e.message || "Could not load this customer’s ledger statement.");
+      }
+    })();
+  }
+  function openCustomerDueReminder(c) {
+    const phone = String(c?.whatsappPhone || c?.phone || "").replace(/\D/g, "");
+    if (!(phone.length === 10 || (phone.length >= 11 && phone.length <= 15))) {
+      setError("This customer does not have a valid WhatsApp number. Update the customer details and try again.");
+      return;
+    }
+    const popup = window.open("about:blank", "_blank");
+    if (!popup) {
+      setError("The WhatsApp window was blocked. Allow pop-ups for this site and try again.");
+      return;
+    }
+    setError("");
+    (async () => {
+      try {
+        const ledger = await api(`/customers/${c._id}/ledger`);
+        if (!(ledger.due > 0)) {
+          popup.close();
+          setError("This customer has no outstanding balance.");
+          await refresh();
+          return;
+        }
+        const customer = ledger.customer || c;
+        const message = buildCustomerDueReminderMessage({ customer, due: ledger.due });
+        popup.location.href = whatsappUrl(customer, message);
+      } catch (e) {
+        popup.close();
+        setError(e.message || "Could not load this customer’s due balance.");
+      }
+    })();
   }
   async function downloadExport(path, filename) {
     if (exporting)
@@ -365,13 +427,14 @@ export default function App() {
   }
 
   const filteredCustomers = useMemo(
-    () =>
-      customers.filter((c) => {
-        if (listFilter === "due" && !(c.balance > 0)) return false;
+    () => {
+      const eligible = listFilter === "due" ? dueCustomers(customers) : customers;
+      return eligible.filter((c) => {
         return `${c.name} ${c.phone} ${c.address}`
           .toLowerCase()
           .includes(search.toLowerCase());
-      }),
+      });
+    },
     [customers, search, listFilter],
   );
   const todayKey = reportingDateKey(new Date());
@@ -387,7 +450,7 @@ export default function App() {
           return false;
         if (listFilter === "today" && o.deliveryStatus === "Cancelled")
           return false;
-        return `${o.orderNumber} ${o.customer?.name || ""} ${o.customer?.phone || ""}`
+        return `${o.orderNumber} ${o.customer?.name || ""} ${o.customer?.phone || ""} ${o.customer?.address || ""} ${o.address || ""}`
           .toLowerCase()
           .includes(search.toLowerCase());
       }),
@@ -505,21 +568,29 @@ export default function App() {
           <section className="panel">
             <div className="section-head">
               <div>
-                <h2>
-                  {listFilter === "due" ? "Customer Due List" : "Customers"}
-                </h2>
+                <h2>{listFilter === "due" ? "Due Customers" : "Customers"}</h2>
                 <p>
                   {listFilter === "due"
                     ? "Customers with outstanding positive balances."
                     : "Manage your shops, hotels, homes and offices."}
                 </p>
               </div>
-              <button
-                className="primary"
-                onClick={() => setCustomerModal(blankCustomer)}
-              >
-                <Plus size={17} /> Add customer
-              </button>
+              <div className="action-row">
+                <button
+                  className="secondary"
+                  onClick={() => goTo(listFilter === "due" ? "/customers" : "/customers/due")}
+                >
+                  {listFilter === "due" ? "All customers" : "Due customers"}
+                </button>
+                {listFilter !== "due" && (
+                  <button
+                    className="primary"
+                    onClick={() => setCustomerModal(blankCustomer)}
+                  >
+                    <Plus size={17} /> Add customer
+                  </button>
+                )}
+              </div>
             </div>
             <SearchBox
               value={search}
@@ -531,6 +602,11 @@ export default function App() {
               onEdit={(c) => setCustomerModal(c)}
               onArchive={archiveCustomer}
               onLedger={openLedger}
+              showManagement={listFilter !== "due"}
+              onPayment={listFilter === "due" ? openCustomerPayment : undefined}
+              onWhatsApp={listFilter === "due" ? openCustomerDueReminder : undefined}
+              emptyTitle={listFilter === "due" ? "No matching due customers" : undefined}
+              emptyDetail={listFilter === "due" ? "No customers have an outstanding balance." : undefined}
             />
           </section>
         )}
@@ -599,6 +675,7 @@ export default function App() {
               onEdit={(c) => setCustomerModal(c)}
               onArchive={archiveCustomer}
               onLedger={openLedger}
+              onLedgerWhatsApp={openCustomerLedgerWhatsApp}
             />
           </section>
         )}
@@ -646,6 +723,20 @@ export default function App() {
           onSave={(data) => addPayment(paymentOrder._id, data)}
         />
       )}
+      {customerPayment && (
+        <CustomerPaymentModal
+          customer={customerPayment.customer}
+          ledger={customerPayment.ledger}
+          onClose={() => setCustomerPayment(null)}
+          onSave={(data) => addCustomerPayment(customerPayment.customer._id, data)}
+        />
+      )}
+      {paymentReceipt && (
+        <CustomerPaymentReceiptModal
+          receipt={paymentReceipt}
+          onClose={() => setPaymentReceipt(null)}
+        />
+      )}
       {ledgerCustomer && (
         <LedgerModal
           data={ledgerCustomer}
@@ -662,181 +753,8 @@ export default function App() {
   );
 }
 
-function Login({ onLogin, busy, error }) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  return (
-    <div className="login-page">
-      <div className="login-card">
-        <div className="login-logo">
-          <Droplets size={30} />
-        </div>
-        <div className="eyebrow center">OWNER ACCESS</div>
-        <h1>KAJAL H2O</h1>
-        <p className="login-sub">Business Manager</p>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            onLogin(email, password);
-          }}
-        >
-          <label>Email address</label>
-          <input
-            type="email"
-            required
-            autoComplete="username"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="owner@example.com"
-          />
-          <label>Password</label>
-          <input
-            type="password"
-            required
-            autoComplete="current-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="Your password"
-          />
-          {error && <div className="form-error">{error}</div>}
-          <button className="primary full" disabled={busy}>
-            {busy ? "Signing in…" : "Sign in securely"}
-          </button>
-        </form>
-        <small className="muted">Single-owner account • INR ledger</small>
-      </div>
-    </div>
-  );
-}
-function Dashboard({
-  data,
-  orders,
-  onNew,
-  onOrders,
-  onCustomers,
-  onTodayCollection,
-  onDue,
-  onTodayOrders,
-  onPendingDeliveries,
-}) {
-  const stats = [
-    {
-      label: "Today's sales",
-      value: money(data?.todaySales),
-      icon: ClipboardList,
-      tone: "blue",
-    },
-    {
-      label: "Monthly sales",
-      value: money(data?.monthlySales),
-      icon: ClipboardList,
-      tone: "purple",
-    },
-    {
-      label: "Today collection",
-      value: money(data?.todayCollected),
-      icon: Wallet,
-      tone: "green",
-      onClick: onTodayCollection,
-    },
-    {
-      label: "Total collection",
-      value: money(data?.totalCollection),
-      icon: Wallet,
-      tone: "teal",
-    },
-    {
-      label: "Total customer due",
-      value: money(data?.totalDue),
-      icon: AlertCircle,
-      tone: "orange",
-      onClick: onDue,
-    },
-    {
-      label: "Today's orders",
-      value: data?.todayOrders ?? 0,
-      icon: ClipboardList,
-      tone: "blue",
-      onClick: onTodayOrders,
-    },
-    {
-      label: "Pending deliveries",
-      value: data?.pendingDeliveries ?? 0,
-      icon: Truck,
-      tone: "purple",
-      onClick: onPendingDeliveries,
-    },
-  ];
-  return (
-    <div className="dashboard">
-      <div className="welcome">
-        <div>
-          <span className="welcome-tag">YOUR BUSINESS AT A GLANCE</span>
-          <h2>Good business starts with clear records.</h2>
-          <p>Keep every order, payment and delivery in one place.</p>
-        </div>
-        <div className="welcome-mark">
-          <Droplets size={56} />
-        </div>
-      </div>
-      <div className="stat-grid">
-        {stats.map((s) => (
-          <button className="stat-card" key={s.label} onClick={s.onClick}>
-            <div className={`stat-icon ${s.tone}`}>
-              <s.icon size={20} />
-            </div>
-            <span>{s.label}</span>
-            <strong>{s.value}</strong>
-          </button>
-        ))}
-      </div>
-      <div className="quick-grid">
-        <button onClick={onNew}>
-          <div className="quick-icon">
-            <Plus />
-          </div>
-          <span>
-            <b>Create an order</b>
-            <small>Record water products and price</small>
-          </span>
-        </button>
-        <button onClick={onCustomers}>
-          <div className="quick-icon teal">
-            <Users />
-          </div>
-          <span>
-            <b>Add or find a customer</b>
-            <small>View contact and outstanding due</small>
-          </span>
-        </button>
-        <button onClick={onOrders}>
-          <div className="quick-icon amber">
-            <Truck />
-          </div>
-          <span>
-            <b>Manage deliveries</b>
-            <small>Update pending orders</small>
-          </span>
-        </button>
-      </div>
-      <section className="panel recent-panel">
-        <div className="section-head">
-          <div>
-            <h2>Recent orders</h2>
-            <p>Latest customer activity</p>
-          </div>
-          <button className="text-btn" onClick={onOrders}>
-            View all <span>→</span>
-          </button>
-        </div>
-        <OrderTable
-          orders={(data?.recentOrders || orders).slice(0, 6)}
-          compact
-        />
-      </section>
-    </div>
-  );
-}
+
+
 function CollectionTable({ payments }) {
   if (!payments.length)
     return (
@@ -874,29 +792,13 @@ function CollectionTable({ payments }) {
     </div>
   );
 }
-function SearchBox({ value, onChange, placeholder }) {
-  return (
-    <div className="searchbox">
-      <Search size={18} />
-      <input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-      />
-      {value && (
-        <button onClick={() => onChange("")}>
-          <X size={15} />
-        </button>
-      )}
-    </div>
-  );
-}
-function CustomerTable({ customers, onEdit, onArchive, onLedger }) {
+
+function CustomerTable({ customers, onEdit, onArchive, onLedger, onLedgerWhatsApp, onWhatsApp, onPayment, showManagement = true, emptyTitle, emptyDetail }) {
   if (!customers.length)
     return (
       <Empty
-        title="No customers found"
-        detail="Add your first customer to start keeping records."
+        title={emptyTitle || "No customers found"}
+        detail={emptyDetail || "Add your first customer to start keeping records."}
       />
     );
   return (
@@ -950,15 +852,45 @@ function CustomerTable({ customers, onEdit, onArchive, onLedger }) {
                   >
                     <Wallet size={15} />
                   </button>
-                  <button
-                    className="small-btn"
-                    title="Edit"
-                    onClick={() => onEdit(c)}
-                  >
-                    <Edit3 size={15} />
-                  </button>
+                  {showManagement && (
+                    <button
+                      className="small-btn"
+                      title="Edit"
+                      onClick={() => onEdit(c)}
+                    >
+                      <Edit3 size={15} />
+                    </button>
+                  )}
+                  {onPayment && c.balance > 0 && (
+                    <button
+                      className="small-btn"
+                      title={`Add payment for ${c.name}`}
+                      aria-label={`Add payment for ${c.name}`}
+                      onClick={() => onPayment(c)}
+                    >
+                      <Banknote size={15} />
+                    </button>
+                  )}
 
-                  <a
+                  {onWhatsApp ? (
+                    <button
+                      className="small-btn wa"
+                      title="Send current due reminder on WhatsApp"
+                      aria-label={`Send current due reminder to ${c.name}`}
+                      onClick={() => onWhatsApp(c)}
+                    >
+                      <MessageCircle size={15} />
+                    </button>
+                  ) : onLedgerWhatsApp ? (
+                    <button
+                      className="small-btn wa"
+                      title="Send ledger statement on WhatsApp"
+                      aria-label={`Send ${c.name}'s ledger statement on WhatsApp`}
+                      onClick={() => onLedgerWhatsApp(c)}
+                    >
+                      <MessageCircle size={15} />
+                    </button>
+                  ) : <a
                     className="small-btn wa"
                     title="WhatsApp"
                     href={whatsappUrl(
@@ -984,157 +916,19 @@ Place your order by sharing:
                     rel="noopener noreferrer"
                   >
                     <MessageCircle size={15} />
-                  </a>
+                  </a>}
 
-                  <button
-                    className="small-btn danger-btn"
-                    title="Archive customer"
-                    onClick={() => onArchive(c)}
-                  >
-                    <X size={15} />
-                  </button>
-                </div>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-function OrderTable({
-  orders,
-  onPayment,
-  onDelivery,
-  onWhatsApp,
-  compact = false,
-}) {
-  if (!orders?.length)
-    return (
-      <Empty title="No orders yet" detail="Create an order to see it here." />
-    );
-  return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Order / Customer</th>
-            <th>Date</th>
-            <th>Items</th>
-            <th>Total</th>
-            <th>Payments Allocated / Due</th>
-            <th>Delivery</th>
-            {!compact && <th>Actions</th>}
-          </tr>
-        </thead>
-        <tbody>
-          {orders.map((o) => (
-            <tr key={o._id}>
-              <td>
-                <b>{o.orderNumber}</b>
-                <small className="block">
-                  {o.customer?.name || "Customer"}
-                </small>
-              </td>
-              <td>{date(o.orderDate)}</td>
-              <td>
-                <div className="items-text">
-                  {(o.items || [])
-                    .map((i) => `${i.product} × ${i.quantity}`)
-                    .join(", ")}
-                </div>
-              </td>
-              <td>
-                <b>
-                  {money(
-                    o.total ??
-                      (o.items || []).reduce(
-                        (s, i) => s + i.quantity * i.unitPrice,
-                        0,
-                      ),
+                  {showManagement && (
+                    <button
+                      className="small-btn danger-btn"
+                      title="Archive customer"
+                      onClick={() => onArchive(c)}
+                    >
+                      <X size={15} />
+                    </button>
                   )}
-                </b>
+                </div>
               </td>
-              <td>
-                <span className="paid-text">
-                  {money(o.allocatedPaid ?? o.paid ?? 0)} Payments Allocated
-                </span>
-                <small className="block due-text">
-                  {money(o.due ?? Math.max(0, (o.total || 0) - (o.paid || 0)))}{" "}
-                  due
-                </small>
-                <small className="block">
-                  Payment status:{" "}
-                  {o.paymentStatus || (o.due > 0 ? "Partially Paid" : "Paid")}
-                </small>
-                <small className="block">
-                  Previous due: {money(o.previousDue || 0)}
-                  {o.previousUnpaidDate && ` · ${date(o.previousUnpaidDate)}`}
-                </small>
-                {o.previousDueAdjustment && (
-                  <small className="block">
-                    Adjusted previous due: {money(o.adjustedPreviousDue || 0)}
-                    {o.previousDueAdjustment.reason &&
-                      ` · ${o.previousDueAdjustment.reason}`}
-                  </small>
-                )}
-                <small className="block">
-                  Total payable: {money(o.totalPayable ?? o.total ?? 0)}
-                </small>
-                {(o.availableAdvanceAtCreation || 0) > 0 && (
-                  <small className="block advance-text">
-                    Available advance: {money(o.availableAdvanceAtCreation)}
-                  </small>
-                )}
-                {(o.advanceApplied || 0) > 0 && (
-                  <small className="block advance-text">
-                    Advance used: {money(o.advanceApplied)}
-                  </small>
-                )}
-                <small className="block due-text">
-                  Final outstanding:{" "}
-                  {money(o.finalOutstandingDue ?? o.due ?? 0)}
-                </small>
-              </td>
-              <td>
-                <span className={`status ${o.deliveryStatus?.toLowerCase()}`}>
-                  {o.deliveryStatus}
-                </span>
-              </td>
-              {!compact && (
-                <td>
-                  <div className="action-row">
-                    {o.deliveryStatus !== "Cancelled" &&
-                      (o.customerDue ?? o.due) > 0 && (
-                        <button
-                          className="small-btn"
-                          title="Record payment"
-                          onClick={() => onPayment(o)}
-                        >
-                          <Wallet size={15} />
-                        </button>
-                      )}
-                    {o.deliveryStatus === "Pending" && (
-                      <button
-                        className="small-btn"
-                        title="Mark delivered"
-                        onClick={() => onDelivery(o, "Delivered")}
-                      >
-                        <Truck size={15} />
-                      </button>
-                    )}
-                    {onWhatsApp && (
-                      <button
-                        className="small-btn wa"
-                        title="WhatsApp"
-                        onClick={() => onWhatsApp(o)}
-                      >
-                        <MessageCircle size={15} />
-                      </button>
-                    )}
-                  </div>
-                </td>
-              )}
             </tr>
           ))}
         </tbody>
@@ -1142,21 +936,13 @@ function OrderTable({
     </div>
   );
 }
-function Empty({ title, detail }) {
-  return (
-    <div className="empty">
-      <div className="empty-icon">
-        <ClipboardList size={24} />
-      </div>
-      <b>{title}</b>
-      <p>{detail}</p>
-    </div>
-  );
-}
+
+
 function CustomerModal({ initial, onClose, onSave }) {
   const [form, setForm] = useState({ ...blankCustomer, ...initial });
   const [saving, setSaving] = useState(false);
   const [phoneError, setPhoneError] = useState("");
+  const [saveError, setSaveError] = useState("");
   const [whatsappEdited, setWhatsappEdited] = useState(
     Boolean(initial?._id || initial?.whatsappPhone),
   );
@@ -1167,7 +953,7 @@ function CustomerModal({ initial, onClose, onSave }) {
       ...(k === "phone" && !whatsappEdited ? { whatsappPhone: v } : {}),
     }));
     if (k === "whatsappPhone") setWhatsappEdited(true);
-    if (k === "phone" && isValidIndianMobile(v)) setPhoneError("");
+    if (k === "phone" && isValidIndianMobile(normalizeIndianMobile(v))) setPhoneError("");
   }
 
   return (
@@ -1178,12 +964,14 @@ function CustomerModal({ initial, onClose, onSave }) {
       <form
         onSubmit={async (e) => {
           e.preventDefault();
-          if (!isValidIndianMobile(form.phone)) {
+          const phone = normalizeIndianMobile(form.phone);
+          if (phone && !isValidIndianMobile(phone)) {
             setPhoneError(INVALID_MOBILE_MESSAGE);
             return;
           }
           setSaving(true);
-          await onSave(form);
+          const result = await onSave({ ...form, phone });
+          if (result !== true) setSaveError(result || "Could not save customer.");
           setSaving(false);
         }}
       >
@@ -1196,17 +984,16 @@ function CustomerModal({ initial, onClose, onSave }) {
               placeholder="Shop or customer name"
             />
           </Field>
-          <Field label="Phone number *">
+          <Field label="Phone number">
             <input
-              required
               inputMode="tel"
-              maxLength={10}
-              pattern="[6-9][0-9]{9}"
+              maxLength={20}
               value={form.phone || ""}
-              onChange={(e) => set("phone", e.target.value)}
-              placeholder="10-digit mobile number"
+              onChange={(e) => { set("phone", e.target.value); setSaveError(""); }}
+              placeholder="Optional, 10-digit Indian mobile"
             />
             {phoneError && <small className="form-error">{phoneError}</small>}
+            {saveError && <small className="form-error">{saveError}</small>}
           </Field>
 
           <Field label="WhatsApp number (with country code)">
@@ -1255,6 +1042,7 @@ function OrderModal({ customers, onClose, onSave, onLoadAccount }) {
   ]);
   const [address, setAddress] = useState("");
   const [deliveryDate, setDeliveryDate] = useState("");
+  const [deliveryShift, setDeliveryShift] = useState("Day");
   const [orderDate, setOrderDate] = useState(localDateInput(new Date()));
   const [initialPayment, setInitialPayment] = useState("0");
   const [initialPaymentMethod, setInitialPaymentMethod] = useState("Cash");
@@ -1345,6 +1133,7 @@ function OrderModal({ customers, onClose, onSave, onLoadAccount }) {
             address,
             orderDate,
             deliveryDate: deliveryDate || null,
+            deliveryShift,
             initialPayment: Number(initialPayment) || 0,
             initialPaymentMethod,
             expectedPreviousDue: systemPreviousDue,
@@ -1399,6 +1188,15 @@ function OrderModal({ customers, onClose, onSave, onLoadAccount }) {
               value={deliveryDate}
               onChange={(e) => setDeliveryDate(e.target.value)}
             />
+          </Field>
+          <Field label="Delivery shift">
+            <select
+              value={deliveryShift}
+              onChange={(e) => setDeliveryShift(e.target.value)}
+            >
+              <option value="Day">Day</option>
+              <option value="Night">Night</option>
+            </select>
           </Field>
 
           <Field label="Order Date">
@@ -1631,6 +1429,91 @@ function OrderModal({ customers, onClose, onSave, onLoadAccount }) {
     </Modal>
   );
 }
+function CustomerPaymentModal({ customer, ledger, onClose, onSave }) {
+  const [amount, setAmount] = useState(String(ledger.due || ""));
+  const [idempotencyKey] = useState(makeRequestId);
+  const [method, setMethod] = useState("Cash");
+  const [reference, setReference] = useState("");
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const history = customerPaymentHistory(ledger.rows);
+  return (
+    <Modal title={`Add payment · ${customer.name}`} onClose={onClose} wide>
+      <div className="balance-banner">
+        <span>Current outstanding due</span>
+        <strong>{money(ledger.due)}</strong>
+      </div>
+      <h3>Previous payments</h3>
+      {history.length ? (
+        <div className="table-wrap ledger-table">
+          <table>
+            <thead><tr><th>Date</th><th>Amount</th><th>Method</th><th>Reference</th></tr></thead>
+            <tbody>
+              {history.map((row, i) => (
+                <tr key={`${row.date}-${row.reference}-${i}`}>
+                  <td>{dateTime(row.date)}</td>
+                  <td>{money(row.credit)}</td>
+                  <td>{row.method || "—"}</td>
+                  <td>{row.paymentReference || row.reference || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : <p className="form-hint">No previous payments recorded.</p>}
+      <form onSubmit={async (e) => {
+        e.preventDefault();
+        setSaving(true);
+        const saved = await onSave({ amount: Number(amount), method, reference, note, idempotencyKey });
+        if (!saved) setSaving(false);
+      }}>
+        <Field label="Amount received (₹)">
+          <input type="number" min="0.01" step="0.01" max={ledger.due} required value={amount} onChange={(e) => setAmount(e.target.value)} />
+        </Field>
+        <p className="form-hint">Payment will be applied to the oldest outstanding orders first.</p>
+        <Field label="Payment method">
+          <select value={method} onChange={(e) => setMethod(e.target.value)}>{METHODS.map((m) => <option key={m}>{m}</option>)}</select>
+        </Field>
+        <Field label="Reference (optional)">
+          <input value={reference} onChange={(e) => setReference(e.target.value)} placeholder="UPI transaction ID" />
+        </Field>
+        <Field label="Note (optional)">
+          <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Payment note" />
+        </Field>
+        <ModalActions onClose={onClose} saving={saving} />
+      </form>
+    </Modal>
+  );
+}
+
+function CustomerPaymentReceiptModal({ receipt, onClose }) {
+  const [message, setMessage] = useState(() => buildCustomerPaymentWhatsAppMessage(receipt));
+  const phone = String(receipt.customer?.whatsappPhone || receipt.customer?.phone || "").replace(/\D/g, "");
+  const canWhatsApp = phone.length >= 10 && phone.length <= 15;
+  return (
+    <Modal title="Payment recorded" onClose={onClose}>
+      <div className="balance-banner">
+        <span>Due before payment</span><strong>{money(receipt.previousDue)}</strong>
+      </div>
+      <p>Received <b>{money(receipt.amount)}</b> · Remaining due <b>{money(receipt.currentDue)}</b></p>
+      <Field label="WhatsApp message (editable)">
+        <textarea rows="6" value={message} onChange={(e) => setMessage(e.target.value)} />
+      </Field>
+      {!canWhatsApp && <p className="form-error">Add a valid WhatsApp number to this customer before sending.</p>}
+      <div className="modal-actions">
+        <button type="button" className="secondary" onClick={onClose}>Close</button>
+      </div>
+      <button
+        className="primary payment-whatsapp-button"
+        disabled={!canWhatsApp}
+        onClick={() => window.open(whatsappUrl(receipt.customer, message), "_blank", "noopener,noreferrer")}
+      >
+        <MessageCircle size={17} /> Open WhatsApp
+      </button>
+    </Modal>
+  );
+}
+
 function PaymentModal({ order, onClose, onSave }) {
   const customerDue = Number(order.customerDue ?? order.due ?? 0);
   const [amount, setAmount] = useState(String(customerDue || ""));
@@ -2047,103 +1930,4 @@ function BackupPage({ onDownload, customers, exporting }) {
       </div>
     </div>
   );
-}
-function Modal({ title, onClose, children, wide = false }) {
-  useEffect(() => {
-    const f = (e) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", f);
-    return () => window.removeEventListener("keydown", f);
-  }, [onClose]);
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <section className={`modal ${wide ? "modal-wide" : ""}`}>
-        <header className="modal-head">
-          <h2>{title}</h2>
-          <button className="icon-btn" onClick={onClose}>
-            <X size={20} />
-          </button>
-        </header>
-        <div className="modal-body">{children}</div>
-      </section>
-    </div>
-  );
-}
-function Field({ label, children, wide = false }) {
-  return (
-    <label className={`field ${wide ? "field-wide" : ""}`}>
-      <span>{label}</span>
-      {children}
-    </label>
-  );
-}
-function ModalActions({ onClose, saving, disabled = false }) {
-  return (
-    <div className="modal-actions">
-      <button type="button" className="secondary" onClick={onClose}>
-        Cancel
-      </button>
-      <button type="submit" className="primary" disabled={saving || disabled}>
-        {saving ? "Saving…" : "Save"}
-      </button>
-    </div>
-  );
-}
-function whatsappUrl(c, message) {
-  let number = String(c?.whatsappPhone || c?.phone || "").replace(/\D/g, "");
-  if (number.length === 10) number = "91" + number;
-  return `https://wa.me/${number}?text=${encodeURIComponent(message)}`;
-}
-
-function formatDate(date) {
-  if (!date) return "";
-
-  const d = new Date(date);
-
-  const day = String(d.getDate()).padStart(2, "0");
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const year = d.getFullYear();
-
-  return `${day}/${month}/${year}`;
-}
-
-function openWhatsApp(order) {
-  const c = order.customer || {};
-  const msg = `*KAJAL H2O*
-🚰Water Distibutor Kharagpur
-━━━━━━━━━━━━━━━━━━
-🌟 *ORDER & PAYMENT RECEIPT*
-━━━━━━━━━━━━━━━━━━
-👋 Dear *${c.name || "Valued Customer"}*,
-🙏 Thank you for choosing *KAJAL H2O*!
-
-🧾 *ORDER SUMMARY*
-━━━━━━━━━━━━━━━━━━
-💰 Total Amount : *${money(order.total)}*
-✅ Paid Amount  : *${money(order.paid)}*
-⏳ Due Amount   : *${money(order.due)}*
-
-🚚 Delivery Date : ${formatDate(order.deliveryDate)}
-
-💳 *PAYMENT INFORMATION*
-━━━━━━━━━━━━━━━━━━
-📱 *UPI ID*:${"8509022744@pnb"}
-📲 *GPay / PhonePe*:${"8509022744"}
-
-🤝 *THANK YOU FOR YOUR TRUST!*
-━━━━━━━━━━━━━━━━━━
-💧 *KAJAL H2O*
-✨ Your Trusted Water Partner
-📞 Contact: 8509022744
-
-💙 *Pure Water • Safe Water • Happy Family*
-  `;
-
-  window.open(whatsappUrl(c, msg), "_blank", "noopener,noreferrer");
 }
