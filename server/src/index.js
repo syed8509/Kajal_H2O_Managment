@@ -123,6 +123,15 @@ app.post("/api/auth/login", async (req, res, next) => {
     const owner = await measureOperation(req, "ownerLookupMs", () =>
       Owner.findOne({ email }),
     );
+
+    //extra likhlam 
+    if (owner){
+      console.log({
+        event: "auth.hash.cost",
+        rounds: bcrypt.getRounds(owner.passwordHash)
+      });
+      //..
+    }
     const isPasswordMatch = await measureOperation(req, "passwordVerifyMs", () =>
       bcrypt.compare(password, owner?.passwordHash),
     );
