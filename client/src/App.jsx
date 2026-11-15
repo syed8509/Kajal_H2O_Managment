@@ -54,7 +54,10 @@ const API = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "") + "/api";
 
 function clientRequestId() {
   return globalThis.crypto?.randomUUID?.() ||
-    `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (character) => {
+      const random = Math.floor(Math.random() * 16);
+      return (character === "x" ? random : (random & 0x3) | 0x8).toString(16);
+    });
 }
 
 function performanceEndpoint(path) {
@@ -133,9 +136,12 @@ export default function App() {
 
   const api = useCallback(
     async (path, options = {}) => {
+      const { onLedgerTiming, ledgerOpenedAt, ...requestOptions } = options;
       const requestId = clientRequestId();
       const endpoint = performanceEndpoint(path);
       const startedAt = performance.now();
+      let responseAt = startedAt;
+      let dataProcessingMs = 0;
       let status = 0;
       const headers = {
         ...(options.body ? { "Content-Type": "application/json" } : {}),
@@ -144,7 +150,8 @@ export default function App() {
         "X-Request-ID": requestId,
       };
       try {
-        const res = await fetch(`${API}${path}`, { ...options, headers });
+        const res = await fetch(`${API}${path}`, { ...requestOptions, headers });
+        responseAt = performance.now();
         status = res.status;
         if (res.status === 401 && path !== "/auth/login") {
           localStorage.removeItem("kh_token");
@@ -158,8 +165,30 @@ export default function App() {
             : { message: "Request failed." };
           throw new Error(body.message || "Request failed.");
         }
-        if (options.raw) return res;
-        return type.includes("application/json") ? await res.json() : await res.text();
+        if (requestOptions.raw) return res;
+        const isLedgerRequest = endpoint === "GET /api/customers/:id/ledger";
+        const responseText = isLedgerRequest && type.includes("application/json")
+          ? await res.text()
+          : null;
+        responseAt = performance.now();
+        const processingStartedAt = performance.now();
+        const data = responseText !== null
+          ? JSON.parse(responseText)
+          : type.includes("application/json")
+            ? await res.json()
+            : await res.text();
+        dataProcessingMs = performance.now() - processingStartedAt;
+        if (onLedgerTiming && endpoint === "GET /api/customers/:id/ledger") {
+          onLedgerTiming({
+            requestId,
+            ledgerOpenToRequestMs: ledgerOpenedAt == null
+              ? 0
+              : startedAt - ledgerOpenedAt,
+            ledgerApiDurationMs: responseAt - startedAt,
+            ledgerDataProcessingMs: dataProcessingMs,
+          });
+        }
+        return data;
       } finally {
         if (endpoint) {
           console.info(JSON.stringify({
@@ -349,8 +378,18 @@ export default function App() {
     }
   }
   async function openLedger(c) {
+    const openedAt = performance.now();
     try {
-      const data = await api(`/customers/${c._id}/ledger`);
+      let apiTiming = null;
+      const data = await api(`/customers/${c._id}/ledger`, {
+        ledgerOpenedAt: openedAt,
+        onLedgerTiming: (timing) => { apiTiming = timing; },
+      });
+      data._ledgerPerformance = {
+        ...apiTiming,
+        openedAt,
+        dataReadyAt: performance.now(),
+      };
       setLedgerCustomer(data);
     } catch (e) {
       setError(e.message);
@@ -792,6 +831,23 @@ export default function App() {
         <LedgerModal
           data={ledgerCustomer}
           onClose={() => setLedgerCustomer(null)}
+          onRenderComplete={() => {
+            const timing = ledgerCustomer._ledgerPerformance;
+            if (!timing) return;
+            const renderedAt = performance.now();
+            console.info(JSON.stringify({
+              event: "frontend.ledger_open.performance",
+              timestamp: new Date().toISOString(),
+              requestId: timing.requestId,
+              endpoint: "GET /api/customers/:id/ledger",
+              status: 200,
+              ledgerOpenToRequestMs: Number(timing.ledgerOpenToRequestMs.toFixed(2)),
+              ledgerApiDurationMs: Number((timing.ledgerApiDurationMs || 0).toFixed(2)),
+              ledgerDataProcessingMs: Number((timing.ledgerDataProcessingMs || 0).toFixed(2)),
+              ledgerRenderCompletionMs: Number((renderedAt - timing.dataReadyAt).toFixed(2)),
+              totalLedgerOpenDurationMs: Number((renderedAt - timing.openedAt).toFixed(2)),
+            }));
+          }}
         />
       )}
       {toast && (
@@ -1641,7 +1697,10 @@ function PaymentModal({ order, onClose, onSave }) {
     </Modal>
   );
 }
-function LedgerModal({ data, onClose }) {
+function LedgerModal({ data, onClose, onRenderComplete }) {
+  useEffect(() => {
+    onRenderComplete?.();
+  }, [data]);
   return (
     <Modal title="Customer ledger" onClose={onClose} wide>
       <div className="ledger-profile">

@@ -506,6 +506,67 @@ test("ledger preserves allocation references when one payment spans multiple inv
   );
 });
 
+test("empty customer ledger returns the compatible zero balance shape", () => {
+  const totals = customerLedgerTotals([]);
+  assert.deepEqual(customerLedgerRows([]), []);
+  assert.deepEqual(
+    {
+      balance: totals.netBalance,
+      due: totals.due,
+      availableAdvance: totals.availableAdvance,
+    },
+    { balance: 0, due: 0, availableAdvance: 0 },
+  );
+});
+
+test("large customer history retains every ledger row and reconciles", () => {
+  const history = Array.from({ length: 250 }, (_, index) => ({
+    ...order("Delivered", `2026-04-${String((index % 28) + 1).padStart(2, "0")}`, 10),
+    _id: `large-ledger-${index}`,
+    orderNumber: `KH-LARGE-${index}`,
+    createdAt: new Date(Date.UTC(2026, 3, 1, 8, index)).toISOString(),
+    payments: [],
+  }));
+  const rows = customerLedgerRows(history);
+  const totals = customerLedgerTotals(history);
+  assert.equal(rows.length, history.length);
+  assert.equal(rows.at(-1).balance, totals.netBalance);
+  assert.equal(totals.due, 2500);
+});
+
+test("ledger timing hooks report FIFO work without changing financial outputs", () => {
+  const history = [
+    {
+      ...order("Delivered", "2026-04-01", 100),
+      _id: "timed-first",
+      orderNumber: "KH-TIMED-1",
+      createdAt: "2026-04-01T08:00:00.000Z",
+      payments: [],
+    },
+    {
+      ...order("Delivered", "2026-04-02", 100, 40),
+      _id: "timed-second",
+      orderNumber: "KH-TIMED-2",
+      createdAt: "2026-04-02T08:00:00.000Z",
+      payments: [{ _id: "timed-payment", amount: 40, paidAt: "2026-04-02T09:00:00.000Z" }],
+    },
+  ];
+  const measuredDurations = [];
+  const instrumentation = {
+    onFifoCalculation: (durationMs) => measuredDurations.push(durationMs),
+  };
+  assert.deepEqual(
+    customerLedgerRows(history, instrumentation),
+    customerLedgerRows(history),
+  );
+  assert.deepEqual(
+    customerLedgerTotals(history, instrumentation),
+    customerLedgerTotals(history),
+  );
+  assert.equal(measuredDurations.length, 2);
+  assert.ok(measuredDurations.every((durationMs) => durationMs >= 0));
+});
+
 test("advance application is informational and does not change customer running balance twice", () => {
   const source = {
     ...order("Delivered", "2026-04-01", 100, 150),

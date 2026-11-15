@@ -1,3 +1,5 @@
+import { performance } from "node:perf_hooks";
+
 export const ORDER_STATUS_PRIORITY = {
   Pending: 0,
   Delivered: 1,
@@ -529,8 +531,17 @@ export function initialOrderPaymentLimit(total, previousDue, advanceApplied) {
   return currentInvoicePayable + previousDueAfterAdvance;
 }
 
-export function customerLedgerTotals(orders) {
-  const fifo = calculateFifoAccounting(orders);
+function calculateLedgerFifo(orders, onFifoCalculation) {
+  const startedAt = performance.now();
+  try {
+    return calculateFifoAccounting(orders);
+  } finally {
+    onFifoCalculation?.(Number((performance.now() - startedAt).toFixed(2)));
+  }
+}
+
+export function customerLedgerTotals(orders, instrumentation = null) {
+  const fifo = calculateLedgerFifo(orders, instrumentation?.onFifoCalculation);
   const sales = orders
     .filter((order) => order.deliveryStatus !== "Cancelled")
     .reduce((sum, order) => sum + orderTotal(order), 0);
@@ -556,9 +567,12 @@ export function customerAdvanceSources(orders) {
   );
 }
 
-export function customerLedgerRows(orders) {
+export function customerLedgerRows(orders, instrumentation = null) {
   const events = [];
-  const accounting = calculateFifoAccounting(orders);
+  const accounting = calculateLedgerFifo(
+    orders,
+    instrumentation?.onFifoCalculation,
+  );
   const orderReferences = new Map(
     orders.map((order) => [
       orderId(order),

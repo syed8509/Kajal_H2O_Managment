@@ -60,6 +60,17 @@ function measureOperation(req, name, operation) {
     });
 }
 
+function measureSyncOperation(req, name, operation) {
+  const startedAt = performance.now();
+  try {
+    return operation();
+  } finally {
+    req.performanceTimings[name] = Number(
+      (performance.now() - startedAt).toFixed(2),
+    );
+  }
+}
+
 function performanceEndpoint(method, path) {
   if (method === "POST" && path === "/api/auth/login") return "POST /api/auth/login";
   if (method === "GET" && path === "/api/dashboard") return "GET /api/dashboard";
@@ -101,6 +112,13 @@ app.use((req, res, next) => {
       durationMs: Number(
         (performance.now() - req.performanceStartedAt).toFixed(2),
       ),
+      ...(endpoint === "GET /api/customers/:id/ledger"
+        ? {
+            totalRequestDurationMs: Number(
+              (performance.now() - req.performanceStartedAt).toFixed(2),
+            ),
+          }
+        : {}),
       status: res.statusCode,
       operationTimings: req.performanceTimings,
     });
@@ -123,15 +141,6 @@ app.post("/api/auth/login", async (req, res, next) => {
     const owner = await measureOperation(req, "ownerLookupMs", () =>
       Owner.findOne({ email }),
     );
-
-    //extra likhlam 
-    if (owner){
-      console.log({
-        event: "auth.hash.cost",
-        rounds: bcrypt.getRounds(owner.passwordHash)
-      });
-      //..
-    }
     const isPasswordMatch = await measureOperation(req, "passwordVerifyMs", () =>
       bcrypt.compare(password, owner?.passwordHash),
     );
@@ -960,25 +969,43 @@ app.patch("/api/orders/:id/delivery", async (req, res, next) => {
 // Ledger statement for a customer
 app.get("/api/customers/:id/ledger", async (req, res, next) => {
   try {
-    const customer = await Customer.findById(req.params.id)
-      .select(
-        "name phone whatsappPhone type address active createdAt updatedAt",
-      )
-      .lean();
+    const customer = await measureOperation(req, "customerLookupMs", () =>
+      Customer.findById(req.params.id)
+        .select(
+          "name phone whatsappPhone type address active createdAt updatedAt",
+        )
+        .lean(),
+    );
     if (!customer)
       return res.status(404).json({ message: "Customer not found." });
-    const orders = await Order.find({ customer: customer._id })
-      .populate("advanceApplications.sourceOrder", "orderNumber")
-      .lean();
-    const rows = customerLedgerRows(orders);
-    const totals = customerLedgerTotals(orders);
-    res.json({
+    const orders = await measureOperation(req, "orderHistoryQueryMs", () =>
+      Order.find({ customer: customer._id })
+        .populate("advanceApplications.sourceOrder", "orderNumber")
+        .lean(),
+    );
+    let fifoCalculationMs = 0;
+    const onFifoCalculation = (durationMs) => {
+      fifoCalculationMs += durationMs;
+    };
+    const rows = measureSyncOperation(req, "ledgerGenerationMs", () =>
+      customerLedgerRows(orders, { onFifoCalculation }),
+    );
+    const totals = customerLedgerTotals(orders, { onFifoCalculation });
+    req.performanceTimings.fifoCalculationMs = Number(
+      fifoCalculationMs.toFixed(2),
+    );
+    const responseStartedAt = performance.now();
+    const payload = {
       customer,
       rows,
       balance: totals.netBalance,
       due: totals.due,
       availableAdvance: totals.availableAdvance,
-    });
+    };
+    req.performanceTimings.responsePreparationMs = Number(
+      (performance.now() - responseStartedAt).toFixed(2),
+    );
+    res.json(payload);
   } catch (e) {
     next(e);
   }
