@@ -68,6 +68,7 @@ For local development, Vite proxies `/api` to the backend. Do not expose the dev
 
 ## 5. Production deployment checklist
 - Deploy the API to a Node-capable host and frontend to a static host (or serve the built frontend from the API).
+- For Vercel, set the frontend project's Root Directory to `client`; `client/vercel.json` rewrites browser routes to the Vite app so direct visits and refreshes work.
 - Set production environment variables on the host.
 - Set `CLIENT_ORIGIN` to the exact HTTPS frontend origin.
 - Set `VITE_API_BASE` to the HTTPS API URL (or configure same-origin hosting).
