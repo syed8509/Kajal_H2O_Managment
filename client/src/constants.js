@@ -1,5 +1,5 @@
 export const PRODUCTS = ["250ml", "500ml", "1L", "2L", "20L"];
-export const TYPES = ["Shop", "Hotel", "Home", "Office", "Bar", "event", "Other"];
+export const TYPES = ["Shop", "Hotel", "Home", "Office", "Bar", "Event", "Other"];
 export const METHODS = ["Cash", "UPI", "Bank Transfer", "Other"];
 export const INVALID_MOBILE_MESSAGE = "Please enter a valid mobile number.";
 export const isValidIndianMobile = (value) => /^[6-9][0-9]{9}$/.test(value);

@@ -42,8 +42,10 @@ import {
 const app = express();
 const PORT = Number(process.env.PORT || 5000);
 const processStartedAt = performance.now();
+const PERFORMANCE_LOGS_ENABLED = process.env.PERFORMANCE_LOGS === "true";
 
 function writePerformanceLog(fields) {
+  if (!PERFORMANCE_LOGS_ENABLED) return;
   console.info(
     JSON.stringify({ timestamp: new Date().toISOString(), ...fields }),
   );
@@ -141,11 +143,17 @@ app.post("/api/auth/login", async (req, res, next) => {
     const owner = await measureOperation(req, "ownerLookupMs", () =>
       Owner.findOne({ email }),
     );
+    if (!owner) {
+      return res
+        .status(401)
+        .json({ message: "Email or password is incorrect." });
+    }
+
     const isPasswordMatch = await measureOperation(req, "passwordVerifyMs", () =>
-      bcrypt.compare(password, owner?.passwordHash),
+      bcrypt.compare(password, owner.passwordHash),
     );
 
-    if (!owner || !isPasswordMatch) {
+    if (!isPasswordMatch) {
       return res
         .status(401)
         .json({ message: "Email or password is incorrect." });
@@ -1168,7 +1176,7 @@ function sanitizeCustomer(body) {
     whatsappPhone: String(body.whatsappPhone ?? phone)
       .trim()
       .slice(0, 20),
-    type: ["Shop", "Hotel", "Home", "Office", "Bra", "Event", "Other"].includes(
+    type: ["Shop", "Hotel", "Home", "Office", "Bar", "Event", "Other"].includes(
       body.type,
     )
       ? body.type

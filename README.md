@@ -27,6 +27,7 @@ Edit `.env`:
 - `MONGODB_URI`: your MongoDB Atlas connection string
 - `JWT_SECRET`: use a long random secret (32+ characters)
 - `OWNER_NAME`, `OWNER_EMAIL`, `OWNER_PASSWORD`: initial owner account; choose a strong unique password
+- `PERFORMANCE_LOGS`: set to `true` to print API/startup performance logs (default: `false`)
 
 Install and start:
 ```bash
@@ -46,6 +47,7 @@ npm install
 npm run dev
 ```
 Open the Vite URL (normally `http://localhost:5173`) and sign in with the owner credentials from `server/.env`.
+Set `VITE_PERFORMANCE_LOGS=true` in `client/.env` only if you want performance logs in the browser console; it defaults to `false`. Restart the server or frontend dev server after changing these settings.
 
 For local development, Vite proxies `/api` to the backend. Do not expose the dev server publicly.
 

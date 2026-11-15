@@ -15,7 +15,7 @@ const customerSchema = new mongoose.Schema(
     whatsappPhone: { type: String, trim: true, maxlength: 20 },
     type: {
       type: String,
-      enum: ["Shop", "Hotel", "Home", "Office", "Special Event", "Other"],
+      enum: ["Shop", "Hotel", "Home", "Office", "Bar", "Event", "Other"],
       default: "Shop",
     },
     address: { type: String, trim: true, default: "", maxlength: 500 },

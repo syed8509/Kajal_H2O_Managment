@@ -51,6 +51,8 @@ import { Empty } from "./components/common/Empty.jsx";
 import { Modal, Field, ModalActions } from "./components/common/Modal.jsx";
 
 const API = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "") + "/api";
+const PERFORMANCE_LOGS_ENABLED =
+  import.meta.env.VITE_PERFORMANCE_LOGS === "true";
 
 function clientRequestId() {
   return globalThis.crypto?.randomUUID?.() ||
@@ -190,7 +192,7 @@ export default function App() {
         }
         return data;
       } finally {
-        if (endpoint) {
+        if (PERFORMANCE_LOGS_ENABLED && endpoint) {
           console.info(JSON.stringify({
             event: "frontend.api.performance",
             timestamp: new Date().toISOString(),
@@ -225,14 +227,16 @@ export default function App() {
       status = "error";
       setError(e.message);
     } finally {
-      console.info(JSON.stringify({
-        event: "frontend.dashboard_load.performance",
-        timestamp: new Date().toISOString(),
-        requestId,
-        endpoint: "dashboard-load",
-        durationMs: Number((performance.now() - startedAt).toFixed(2)),
-        status,
-      }));
+      if (PERFORMANCE_LOGS_ENABLED) {
+        console.info(JSON.stringify({
+          event: "frontend.dashboard_load.performance",
+          timestamp: new Date().toISOString(),
+          requestId,
+          endpoint: "dashboard-load",
+          durationMs: Number((performance.now() - startedAt).toFixed(2)),
+          status,
+        }));
+      }
       setBusy(false);
     }
   }, [api, token]);
@@ -1951,7 +1955,7 @@ function BackupPage({ onDownload, customers, exporting }) {
             </small>
           </div>
           <span>
-            {exporting?.includes("ledger") ? "Preparing…" : "Download"}
+            {exporting?.includes("ledger") ? "Preparing…" : "↓"}
           </span>
         </button>
         <button
@@ -1970,7 +1974,7 @@ function BackupPage({ onDownload, customers, exporting }) {
             </small>
           </div>
           <span>
-            {exporting?.includes("payment-details") ? "Preparing…" : "Download"}
+            {exporting?.includes("payment-details") ? "Preparing…" : "↓"}
           </span>
         </button>
         {exporting && (
