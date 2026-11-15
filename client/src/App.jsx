@@ -52,6 +52,26 @@ import { Modal, Field, ModalActions } from "./components/common/Modal.jsx";
 
 const API = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "") + "/api";
 
+function clientRequestId() {
+  return globalThis.crypto?.randomUUID?.() ||
+    `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function performanceEndpoint(path) {
+  const cleanPath = path.split("?")[0];
+  if (cleanPath === "/auth/login") return "POST /api/auth/login";
+  if (cleanPath === "/dashboard") return "GET /api/dashboard";
+  if (/^\/orders\/[^/]+\/delivery$/.test(cleanPath))
+    return "PATCH /api/orders/:id/delivery";
+  if (/^\/orders\/[^/]+\/payments$/.test(cleanPath))
+    return "POST /api/orders/:id/payments";
+  if (/^\/customers\/[^/]+\/payments$/.test(cleanPath))
+    return "POST /api/customers/:id/payments";
+  if (/^\/customers\/[^/]+\/ledger$/.test(cleanPath))
+    return "GET /api/customers/:id/ledger";
+  return null;
+}
+
 function routeFromPath(pathname) {
   const routes = {
     "/": { page: "Dashboard", filter: "" },
@@ -113,32 +133,54 @@ export default function App() {
 
   const api = useCallback(
     async (path, options = {}) => {
+      const requestId = clientRequestId();
+      const endpoint = performanceEndpoint(path);
+      const startedAt = performance.now();
+      let status = 0;
       const headers = {
         ...(options.body ? { "Content-Type": "application/json" } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(options.headers || {}),
+        "X-Request-ID": requestId,
       };
-      const res = await fetch(`${API}${path}`, { ...options, headers });
-      if (res.status === 401 && path !== "/auth/login") {
-        localStorage.removeItem("kh_token");
-        setToken("");
-        setOwner(null);
+      try {
+        const res = await fetch(`${API}${path}`, { ...options, headers });
+        status = res.status;
+        if (res.status === 401 && path !== "/auth/login") {
+          localStorage.removeItem("kh_token");
+          setToken("");
+          setOwner(null);
+        }
+        const type = res.headers.get("content-type") || "";
+        if (!res.ok) {
+          const body = type.includes("application/json")
+            ? await res.json()
+            : { message: "Request failed." };
+          throw new Error(body.message || "Request failed.");
+        }
+        if (options.raw) return res;
+        return type.includes("application/json") ? await res.json() : await res.text();
+      } finally {
+        if (endpoint) {
+          console.info(JSON.stringify({
+            event: "frontend.api.performance",
+            timestamp: new Date().toISOString(),
+            requestId,
+            endpoint,
+            durationMs: Number((performance.now() - startedAt).toFixed(2)),
+            status,
+          }));
+        }
       }
-      const type = res.headers.get("content-type") || "";
-      if (!res.ok) {
-        const body = type.includes("application/json")
-          ? await res.json()
-          : { message: "Request failed." };
-        throw new Error(body.message || "Request failed.");
-      }
-      if (options.raw) return res;
-      return type.includes("application/json") ? res.json() : res.text();
     },
     [token],
   );
 
   const refresh = useCallback(async () => {
     if (!token) return;
+    const requestId = clientRequestId();
+    const startedAt = performance.now();
+    let status = "success";
     setBusy(true);
     setError("");
     try {
@@ -151,8 +193,17 @@ export default function App() {
       setCustomers(c);
       setOrders(o);
     } catch (e) {
+      status = "error";
       setError(e.message);
     } finally {
+      console.info(JSON.stringify({
+        event: "frontend.dashboard_load.performance",
+        timestamp: new Date().toISOString(),
+        requestId,
+        endpoint: "dashboard-load",
+        durationMs: Number((performance.now() - startedAt).toFixed(2)),
+        status,
+      }));
       setBusy(false);
     }
   }, [api, token]);

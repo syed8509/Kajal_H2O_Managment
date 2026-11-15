@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import express from "express";
 import mongoose from "mongoose";
 import cors from "cors";
@@ -40,6 +41,39 @@ import {
 
 const app = express();
 const PORT = Number(process.env.PORT || 5000);
+const processStartedAt = performance.now();
+
+function writePerformanceLog(fields) {
+  console.info(
+    JSON.stringify({ timestamp: new Date().toISOString(), ...fields }),
+  );
+}
+
+function measureOperation(req, name, operation) {
+  const startedAt = performance.now();
+  return Promise.resolve()
+    .then(operation)
+    .finally(() => {
+      req.performanceTimings[name] = Number(
+        (performance.now() - startedAt).toFixed(2),
+      );
+    });
+}
+
+function performanceEndpoint(method, path) {
+  if (method === "POST" && path === "/api/auth/login") return "POST /api/auth/login";
+  if (method === "GET" && path === "/api/dashboard") return "GET /api/dashboard";
+  if (method === "PATCH" && /^\/api\/orders\/[^/]+\/delivery$/.test(path))
+    return "PATCH /api/orders/:id/delivery";
+  if (method === "POST" && /^\/api\/orders\/[^/]+\/payments$/.test(path))
+    return "POST /api/orders/:id/payments";
+  if (method === "POST" && /^\/api\/customers\/[^/]+\/payments$/.test(path))
+    return "POST /api/customers/:id/payments";
+  if (method === "GET" && /^\/api\/customers\/[^/]+\/ledger$/.test(path))
+    return "GET /api/customers/:id/ledger";
+  return null;
+}
+
 app.use(helmet());
 app.use(
   cors({
@@ -48,6 +82,31 @@ app.use(
       : "http://localhost:5173",
   }),
 );
+app.use((req, res, next) => {
+  const suppliedId = req.get("x-request-id");
+  req.requestId =
+    suppliedId && /^[0-9a-f-]{36}$/i.test(suppliedId)
+      ? suppliedId
+      : randomUUID();
+  req.performanceStartedAt = performance.now();
+  req.performanceTimings = {};
+  res.setHeader("X-Request-ID", req.requestId);
+  res.on("finish", () => {
+    const endpoint = performanceEndpoint(req.method, req.path);
+    if (!endpoint) return;
+    writePerformanceLog({
+      event: "api.performance",
+      requestId: req.requestId,
+      endpoint,
+      durationMs: Number(
+        (performance.now() - req.performanceStartedAt).toFixed(2),
+      ),
+      status: res.statusCode,
+      operationTimings: req.performanceTimings,
+    });
+  });
+  next();
+});
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) =>
@@ -61,18 +120,24 @@ app.post("/api/auth/login", async (req, res, next) => {
       .trim();
     const password = String(req.body.password || "");
 
-    const owner = await Owner.findOne({ email });
-    const isPasswordMatch = await bcrypt.compare(password, owner?.passwordHash);
+    const owner = await measureOperation(req, "ownerLookupMs", () =>
+      Owner.findOne({ email }),
+    );
+    const isPasswordMatch = await measureOperation(req, "passwordVerifyMs", () =>
+      bcrypt.compare(password, owner?.passwordHash),
+    );
 
     if (!owner || !isPasswordMatch) {
       return res
         .status(401)
         .json({ message: "Email or password is incorrect." });
     }
-    const token = jwt.sign(
-      { sub: owner._id.toString(), email: owner.email, name: owner.name },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || "12h" },
+    const token = await measureOperation(req, "jwtSignMs", () =>
+      jwt.sign(
+        { sub: owner._id.toString(), email: owner.email, name: owner.name },
+        process.env.JWT_SECRET,
+        { expiresIn: process.env.JWT_EXPIRES_IN || "12h" },
+      ),
     );
     res.json({ token, owner: { name: owner.name, email: owner.email } });
   } catch (e) {
@@ -1284,6 +1349,28 @@ if (!process.env.MONGODB_URI || !process.env.JWT_SECRET) {
   );
   process.exit(1);
 }
+const connectionStartedAt = performance.now();
 await mongoose.connect(process.env.MONGODB_URI);
+writePerformanceLog({
+  event: "startup.performance",
+  endpoint: "startup.mongodb_connect",
+  durationMs: Number((performance.now() - connectionStartedAt).toFixed(2)),
+  status: "connected",
+});
+const indexesStartedAt = performance.now();
 await Customer.createIndexes();
-app.listen(PORT, () => console.log(`KAJAL H2O API listening on port ${PORT}`));
+writePerformanceLog({
+  event: "startup.performance",
+  endpoint: "startup.customer_create_indexes",
+  durationMs: Number((performance.now() - indexesStartedAt).toFixed(2)),
+  status: "complete",
+});
+app.listen(PORT, () => {
+  writePerformanceLog({
+    event: "startup.performance",
+    endpoint: "startup.server_readiness",
+    durationMs: Number((performance.now() - processStartedAt).toFixed(2)),
+    status: "ready",
+  });
+  console.log(`KAJAL H2O API listening on port ${PORT}`);
+});
